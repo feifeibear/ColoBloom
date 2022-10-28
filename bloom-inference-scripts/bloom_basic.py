@@ -9,21 +9,23 @@ from colossalai.tensor import ShardSpec, ComputeSpec, ComputePattern, ColoParame
 
 
 def run_torch():
+    kwargs = dict(
+        device_map='balanced_low_0'
+    )
+    kwargs["load_in_8bit"] = True
     tokenizer = BloomTokenizerFast.from_pretrained("/data2/users/lczht/bloom-560m")
-    model = BloomForCausalLM.from_pretrained("/data2/users/lczht/bloom-560m").cuda()
+    model = BloomForCausalLM.from_pretrained("/data2/users/lczht/bloom-560m", **kwargs)
     inputs = tokenizer("Hello, my dog is cute", return_tensors="pt")
 
     for k, v in inputs.items():
-        inputs[k] = v.cuda()
-    inputs = tokenizer("Hello, my dog is cute", return_tensors="pt")
-    for k, v in inputs.items():
-        inputs[k] = v.cuda()
+        inputs[k] = v.to("cuda")
 
     # model inference
     outputs = model(**inputs, labels=inputs["input_ids"])
     loss = outputs.loss
     logits = outputs.logits
     print(logits)
+    print(model.device)
 
 def run_CAI():
     colossalai.launch_from_torch(config={})
