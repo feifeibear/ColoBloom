@@ -77,7 +77,6 @@ model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
 if args.benchmark:
     t_ready = time.time()
 
-
 ### Generate
 
 print_rank0(f"*** Starting to generate {num_tokens} tokens with bs={args.batch_size}")
@@ -129,8 +128,10 @@ def colo_generate():
             # reset process group for all parameters
             param.set_process_group(pg)
 
-            if 'dense_h_to_4h.weight' in pn or 'self_attention.query_key_value' in pn or 'mlp.dense_4h_to_h' in pn:
-                split_param_row_tp1d(param, pg)  # colmn slice 
+            param_name = f"{mn}.{pn}"
+            if 'dense_h_to_4h.weight' in param_name or 'self_attention.query_key_value.weight' in param_name or 'mlp.dense_4h_to_h.weight' in param_name:
+                split_param_col_tp1d(param, pg)  # colmn slice 
+                # print(f'split_param_row_tp1d for {param_name}')
     
     # run inference
     input_tokens = tokenizer.batch_encode_plus(inputs, return_tensors="pt", padding=True)
