@@ -64,10 +64,17 @@ def run_CAI():
             # reset process group for all parameters
             param.set_process_group(pg)
             param_name = f"{mn}.{pn}"
-            if 'dense_h_to_4h.weight' in param_name or 'self_attention.query_key_value.weight' in param_name or 'mlp.dense_4h_to_h.weight' in param_name:
-                split_param_col_tp1d(param, pg)  # colmn slice 
-                print(f'split_param_row_tp1d for {param_name}')
 
+            shard_param_names = ['self_attention.dense.weight', 'dense_h_to_4h.weight', 'dense_4h_to_h.weight', 'self_attention.query_key_value.weight', 'word_embeddings.weight']
+            is_shard = False
+            for keyword in shard_param_names:
+                if keyword in param_name:
+                    split_param_col_tp1d(param, pg)  # colmn slice 
+                    # print(f'split_param_row_tp1d for {param_name}')
+                    is_shard = True
+            
+            # if not is_shard and 'bias' not in param_name:
+            #     print(param_name)
 
     total_numel = 0
     for name, p in model.named_parameters():
@@ -78,7 +85,8 @@ def run_CAI():
     outputs = model(**inputs, labels=inputs["input_ids"])
     loss = outputs.loss
     logits = outputs.logits
-
+    
+    torch.cuda.synchronize()
     print(logits)
 
 if __name__ == '__main__':

@@ -129,9 +129,13 @@ def colo_generate():
             param.set_process_group(pg)
 
             param_name = f"{mn}.{pn}"
-            if 'dense_h_to_4h.weight' in param_name or 'self_attention.query_key_value.weight' in param_name or 'mlp.dense_4h_to_h.weight' in param_name:
-                split_param_col_tp1d(param, pg)  # colmn slice 
-                # print(f'split_param_row_tp1d for {param_name}')
+            shard_param_names = ['self_attention.dense.weight', 'dense_h_to_4h.weight', 'dense_4h_to_h.weight', 'self_attention.query_key_value.weight', 'word_embeddings.weight']
+            is_shard = False
+            for keyword in shard_param_names:
+                if keyword in param_name:
+                    split_param_col_tp1d(param, pg)  # colmn slice 
+                    # print(f'split_param_row_tp1d for {param_name}')
+                    is_shard = True
     
     # run inference
     input_tokens = tokenizer.batch_encode_plus(inputs, return_tensors="pt", padding=True)
@@ -217,3 +221,4 @@ Tokenize and generate {total_new_tokens_generated} (bs={args.batch_size}) tokens
 Start to finish: {t_ready - t_start + t_generate_span:.3f} secs
 """
     )
+    
