@@ -9,12 +9,15 @@ from colossalai.tensor import ShardSpec, ComputeSpec, ComputePattern, ColoParame
 
 
 def run_torch():
-    kwargs = dict(
-        device_map='balanced_low_0'
-    )
-    kwargs["load_in_8bit"] = True
+    kwargs = dict()
+    # kwargs = dict(
+    #     device_map='balanced_low_0'
+    # )
+    # kwargs["load_in_8bit"] = True
     tokenizer = BloomTokenizerFast.from_pretrained("/data2/users/lczht/bloom-560m")
     model = BloomForCausalLM.from_pretrained("/data2/users/lczht/bloom-560m", **kwargs)
+
+
     inputs = tokenizer("Hello, my dog is cute", return_tensors="pt")
 
     for k, v in inputs.items():
@@ -40,8 +43,7 @@ def run_CAI():
     for k, v in inputs.items():
         inputs[k] = v.cuda()
 
-    for name, p in model.named_parameters():
-        print(name)
+
 
     # add ColossalAI Tensor Splitting Parallel
     def split_param_single_dim_tp1d(dim: int, param: ColoParameter, pg: ProcessGroup):
@@ -61,17 +63,31 @@ def run_CAI():
         for pn, param in module.named_parameters(recurse=False):
             # reset process group for all parameters
             param.set_process_group(pg)
+            param_name = f"{mn}.{pn}"
 
-            if 'dense_h_to_4h.weight' in pn or 'self_attention.query_key_value' in pn or 'mlp.dense_4h_to_h' in pn:
-                split_param_row_tp1d(param, pg)  # colmn slice 
+            shard_param_names = ['self_attention.dense.weight', 'dense_h_to_4h.weight', 'dense_4h_to_h.weight', 'self_attention.query_key_value.weight', 'word_embeddings.weight']
+            is_shard = False
+            for keyword in shard_param_names:
+                if keyword in param_name:
+                    split_param_col_tp1d(param, pg)  # colmn slice 
+                    # print(f'split_param_row_tp1d for {param_name}')
+                    is_shard = True
+            
+            # if not is_shard and 'bias' not in param_name:
+            #     print(param_name)
 
+    total_numel = 0
+    for name, p in model.named_parameters():
+        total_numel += p.numel()
+    print(f"numel of the model {total_numel/1e9}")
 
     # model inference
     outputs = model(**inputs, labels=inputs["input_ids"])
     loss = outputs.loss
     logits = outputs.logits
-
+    
+    torch.cuda.synchronize()
     print(logits)
 
 if __name__ == '__main__':
-    run_torch()
+    run_CAI()
