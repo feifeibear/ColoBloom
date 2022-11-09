@@ -130,15 +130,10 @@ def run_tp():
     inputs = tokenizer("Hello, my dog is cute", return_tensors="pt").to(rank)
 
     # inference
-    
     outputs = model(**inputs, labels=inputs["input_ids"])
     logits = outputs.logits
     
     print(logits)
-    
-    # outputs = model.generate(**inputs, labels=inputs["input_ids"])
-    # output = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-    # print(output)
 
 
 def compare():
@@ -171,24 +166,16 @@ def compare():
     inputs = tokenizer("Hello, my dog is cute", return_tensors="pt").to(rank)
 
     # inference
-    
     outputs = model(**inputs, labels=inputs["input_ids"])
     output = outputs.logits
-
 
     model2 = BloomForCausalLM.from_pretrained("/data2/users/lczht/bloom-560m", device_map='auto', load_in_8bit=True)
     outputs2 = model2(**inputs, labels=inputs["input_ids"])
     output2 = outputs2.logits
 
-    model3 = BloomForCausalLM.from_pretrained("/data2/users/lczht/bloom-560m").to(rank)
-    outputs3 = model3(**inputs, labels=inputs["input_ids"])
-    output3 = outputs3.logits
-
-    print(torch.max(abs(output - output2)))
-    print(torch.max(abs(output - output3)))
-    print(torch.max(abs(output2 - output3)))
+    assert torch.allclose(output, output2)==True, f'outputs from this method and hf method are not equal!!'
 
 
 if __name__ == '__main__':
-    run_tp()
-    # compare()
+    # run_tp()
+    compare()
