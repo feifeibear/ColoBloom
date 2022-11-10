@@ -1,18 +1,16 @@
 import torch
 from transformers import BloomTokenizerFast, BloomForCausalLM
 import torch.distributed as dist
-import os
 from utils import replace_8bit_linear_tp, get_8bit_tp_model
+import colossalai
 
-# random_seed
-torch.manual_seed(0)
 
-def run_tp():
+def run_tp(world_size : int = 2):
     # init
-    world_size = 2
-    local_rank = int(os.getenv("LOCAL_RANK", "0"))
-    rank = local_rank
-    dist.init_process_group(backend='nccl', world_size=world_size, rank=rank)
+    torch.manual_seed(0)
+    colossalai.launch_from_torch(config={})
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
 
     model = BloomForCausalLM.from_pretrained("/data2/users/lczht/bloom-560m")
     model = model.half()
@@ -33,12 +31,12 @@ def run_tp():
     print(logits)
 
 
-def compare():
+def check_results():
      # init
-    world_size = 2
-    local_rank = int(os.getenv("LOCAL_RANK", "0"))
-    rank = local_rank
-    dist.init_process_group(backend='nccl', world_size=world_size, rank=rank)
+    torch.manual_seed(0)
+    colossalai.launch_from_torch(config={})
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
 
     model = BloomForCausalLM.from_pretrained("/data2/users/lczht/bloom-560m")
     model = model.half()
@@ -64,5 +62,5 @@ def compare():
 
 
 if __name__ == '__main__':
-    # run_tp()
-    compare()
+    run_tp()
+    # check_results()
