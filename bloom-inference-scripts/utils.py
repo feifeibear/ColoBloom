@@ -1,8 +1,10 @@
 import torch
-from torch import nn
+from torch import nn, Tensor
 import torch.distributed as dist
 import bitsandbytes as bnb
-
+import torch.nn.functional as F
+from typing import Optional
+from torch.distributed.distributed_c10d import ReduceOp
 
 class Int8Params(torch.nn.Parameter):
     def __new__(
@@ -119,6 +121,64 @@ class Linear8bit(nn.Linear):
 
         return out
 
+class LinearTP(torch.nn.Linear):
+    def __init__(self, input_features, output_features, bias=False, weight_data=None, bias_data=None):
+        super(LinearTP, self).__init__(input_features, output_features, bias)
+        self.weight = weight_data
+        self.bias = bias_data
+        self.rank = dist.get_rank()
+        self.world_size = dist.get_world_size()
+        
+    def forward(self, x):
+        x = x.chunk(self.world_size, dim=2)[self.rank] 
+        out = F.linear(x, self.weight, self.bias)
+        dist.all_reduce(out, op=ReduceOp.SUM)
+        return out
+
+class EmbeddingTP(torch.nn.Embedding):
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: Optional[int] = None,
+        max_norm: Optional[float] = None,
+        norm_type: float = 2.0,
+        scale_grad_by_freq: bool = False,
+        sparse: bool = False,
+        weight: Optional[Tensor] = None,
+    ) -> None:
+        super(EmbeddingTP, self).__init__(
+            num_embeddings,
+            embedding_dim,
+            padding_idx,
+            max_norm,
+            norm_type,
+            scale_grad_by_freq,
+            sparse,
+            weight,
+        )
+        self.rank = dist.get_rank()
+        self.world_size = dist.get_world_size()
+        self.weight = weight
+
+    def forward(self, input: Tensor) -> Tensor:
+        emb = F.embedding(
+            input,
+            self.weight,
+            self.padding_idx,
+            self.max_norm,
+            self.norm_type,
+            self.scale_grad_by_freq,
+            self.sparse,
+        )
+        
+        tensor_list = [torch.zeros_like(emb) for _ in range(self.world_size)]
+        dist.all_gather(tensor_list, emb)
+        emb = torch.cat(tensor_list, dim=2)
+
+        return emb
+
+
 def replace_8bit_linear_tp(model, threshold=6.0, modules_to_not_convert="lm_head"):
     for name, module in model.named_children():
         if len(list(module.children())) > 0:
@@ -132,6 +192,25 @@ def replace_8bit_linear_tp(model, threshold=6.0, modules_to_not_convert="lm_head
                         weight_data=module.weight,
                         bias_data=module.bias,
                 )
+        
+        if isinstance(module, nn.Embedding):
+            model._modules[name] = EmbeddingTP(
+                num_embeddings=module.num_embeddings,
+                embedding_dim=module.embedding_dim,
+                padding_idx=module.padding_idx,
+                max_norm=module.max_norm,
+                norm_type=module.norm_type,
+                scale_grad_by_freq=module.scale_grad_by_freq,
+                sparse=module.sparse,
+                weight=module.weight,
+            )
+        if name == 'lm_head':
+            model._modules[name] = LinearTP(
+                input_features=module.in_features,
+                output_features=module.out_features,
+                weight_data=module.weight,
+                bias=False,
+            )
     return model
 
 def replace_8bit_linear(model, threshold=6.0, modules_to_not_convert="lm_head"):
@@ -157,9 +236,26 @@ def get_8bit_tp_model(model, rank, world_size):
 
             SCB_list = list(module.weight.SCB.chunk(world_size, dim=0))
             SCB = SCB_list[rank]
-            module.weight = Int8Params(data=weight, SCB=SCB)
+            delattr(module, "weight")
+            setattr(module, "weight", Int8Params(data=weight, SCB=SCB))
 
             bias_list = list(module.bias.data.chunk(world_size, dim=0))
             bias = bias_list[rank]
-            module.bias = nn.Parameter(bias)
+            delattr(module, "bias")
+            setattr(module, "bias", nn.Parameter(bias))
+        
+        if isinstance(module, EmbeddingTP):
+            
+            weight_list = list(module.weight.chunk(world_size, dim=1))
+            delattr(module, 'weight')
+            weight = nn.Parameter(weight_list[rank])
+            setattr(module, 'weight', weight)
+            module_emb = module
+            
+        if isinstance(module, LinearTP):
+            delattr(module, 'weight')
+            setattr(module, 'weight', module_emb.weight)
+            del module_emb
+            
+        
     return model
