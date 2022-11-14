@@ -1,12 +1,13 @@
 import torch
 from transformers import BloomTokenizerFast, BloomForCausalLM
 import torch.distributed as dist
-from colossalai.tensor import ProcessGroup
+from colossalai.tensor import ProcessGroup, ReplicaSpec
 
 import colossalai
 from colossalai.utils.model.colo_init_context import ColoInitContext
 from colossalai.tensor import ShardSpec, ComputeSpec, ComputePattern, ColoParameter, ProcessGroup
 
+from transformers import BloomConfig
 
 def run_torch():
     kwargs = dict()
@@ -35,9 +36,16 @@ def run_CAI():
 
     tokenizer = BloomTokenizerFast.from_pretrained("/data2/users/lczht/bloom-560m")
 
-    with ColoInitContext(device=torch.device('cuda')):
-        model = BloomForCausalLM.from_pretrained("/data2/users/lczht/bloom-560m")
-
+    configuration = BloomConfig(hidden_size=1024,  # 64
+                                    n_layer=32,  # 2
+                                    n_head=32,  # 8
+                                    )
+    # default_shard_plan = {'pg': ProcessGroup(tp_degree=dist.get_world_size()), 'shard_spec': ReplicaSpec()}
+    # default_shard_plan = None
+    default_shard_plan = {'pg': ProcessGroup(tp_degree=dist.get_world_size()), 'shard_spec': ShardSpec(dims=[-1], num_partitions=[dist.get_world_size()])}
+    with ColoInitContext(device=torch.device('cuda'), default_shard_plan=default_shard_plan):
+        # model = BloomForCausalLM.from_pretrained("/data2/users/lczht/bloom-560m")
+        model = BloomForCausalLM(configuration)
     inputs = tokenizer("Hello, my dog is cute", return_tensors="pt")
 
     for k, v in inputs.items():
@@ -58,11 +66,13 @@ def run_CAI():
     def split_param_col_tp1d(param: ColoParameter, pg: ProcessGroup):
         split_param_single_dim_tp1d(-1, param, pg)
 
-    pg = ProcessGroup(tp_degree=dist.get_world_size())
+    # pg = ProcessGroup(tp_degree=dist.get_world_size())
     for mn, module in model.named_modules():
         for pn, param in module.named_parameters(recurse=False):
             # reset process group for all parameters
-            param.set_process_group(pg)
+            param.set_dist_spec(ReplicaSpec())
+            # param.set_process_group(pg)
+            pg = param.get_process_group()
             param_name = f"{mn}.{pn}"
 
             shard_param_names = ['self_attention.dense.weight', 'dense_h_to_4h.weight', 'dense_4h_to_h.weight', 'self_attention.query_key_value.weight', 'word_embeddings.weight']
@@ -70,9 +80,12 @@ def run_CAI():
             for keyword in shard_param_names:
                 if keyword in param_name:
                     split_param_col_tp1d(param, pg)  # colmn slice 
+                    # param.set_dist_spec(new_shard)
                     # print(f'split_param_row_tp1d for {param_name}')
                     is_shard = True
-            
+                    break
+            # if not is_shard:
+            #     param.set_dist_spec(ReplicaSpec())
             # if not is_shard and 'bias' not in param_name:
             #     print(param_name)
 
