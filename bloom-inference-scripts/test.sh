@@ -13,9 +13,9 @@ CUDA_VISIBLE_DEVICES_set_n_least_memory_usage() {
     echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 }
 
-export GPU_NUM=1
+export GPU_NUM=2
 CUDA_VISIBLE_DEVICES_set_n_least_memory_usage ${GPU_NUM} 
 
-export CUDA_LAUNCH_BLOCKING=1
+# export CUDA_LAUNCH_BLOCKING=1
 
-torchrun --nproc_per_node=${GPU_NUM} --master_port=1145 bloom_basic.py 
+torchrun --nproc_per_node=${GPU_NUM} --master_port=1145 bloom_cai.py --use_shard_int True --backend "colossalai"
