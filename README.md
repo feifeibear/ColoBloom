@@ -1,3 +1,7 @@
+# ColossalAI Implementation for BLOOM Inference
+Under development. 
+This repo is going to support BLOOM Inference with optimizations, such as Tensor Parallelism, Int8 quantization, with the help of ColossalAI.
+
 # Fast Inference Solutions for BLOOM
 
 This repo provides demos and packages to perform fast inference solutions for BLOOM. Some of the solutions have their own repos in which case a link to the corresponding repos is provided instead.
