@@ -5,6 +5,23 @@ import bitsandbytes as bnb
 import torch.nn.functional as F
 from typing import Optional
 from torch.distributed.distributed_c10d import ReduceOp
+import time
+import torch.profiler
+
+def getModelSize(model):
+    param_size = 0
+    param_sum = 0
+    for param in model.parameters():
+        param_size += param.nelement() * param.element_size()
+        param_sum += param.nelement()
+    buffer_size = 0
+    buffer_sum = 0
+    for buffer in model.buffers():
+        buffer_size += buffer.nelement() * buffer.element_size()
+        buffer_sum += buffer.nelement()
+    all_size = (param_size + buffer_size) / 1024 / 1024
+    print('模型总大小为：{:.3f}MB'.format(all_size))
+    return (param_size, param_sum, buffer_size, buffer_sum, all_size)
 
 class Int8Params(torch.nn.Parameter):
     def __new__(
@@ -57,24 +74,26 @@ class Linear8bitTP(nn.Linear):
         weight = weight_data.data.contiguous().half().to(self.rank)
 
         CB, _, SCB, _, _ = bnb.functional.double_quant(weight)
-        self.weight = Int8Params(data=CB, SCB=SCB)
+        delattr(self, "weight")
+        setattr(self, "weight", Int8Params(data=CB, SCB=SCB))
+        self.weight.data = self.weight.data.to("cpu")
 
     def forward(self, x):
         self.state.is_training = self.training
         
-        # weights are cast automatically as Int8Params, but the bias has to be cast manually
         if self.bias is not None and self.bias.dtype != torch.float16:
             self.bias.data = self.bias.data.half()
         
         self.state.CB = self.weight.data
         self.state.SCB = self.weight.SCB
-
+        
         out = bnb.matmul(x, self.weight, bias=self.bias, state=self.state)
-
         tensor_list = [torch.zeros_like(out) for _ in range(self.world_size)]
         dist.all_gather(tensor_list, out)
         out = torch.cat(tensor_list, dim=2)
-
+        del tensor_list
+        del self.state.CxB
+        
         return out
 
 class Linear8bit(nn.Linear):
@@ -105,20 +124,20 @@ class Linear8bit(nn.Linear):
         weight = weight_data.data.contiguous().half().to(torch.cuda.current_device())
 
         CB, _, SCB, _, _ = bnb.functional.double_quant(weight)
-        self.weight = Int8Params(data=CB, SCB=SCB)
+        delattr(self, "weight")
+        setattr(self, "weight", Int8Params(data=CB, SCB=SCB))
 
     def forward(self, x):
         self.state.is_training = self.training
         
-        # weights are cast automatically as Int8Params, but the bias has to be cast manually
         if self.bias is not None and self.bias.dtype != torch.float16:
             self.bias.data = self.bias.data.half()
         
         self.state.CB = self.weight.data
         self.state.SCB = self.weight.SCB
-
         out = bnb.matmul(x, self.weight, bias=self.bias, state=self.state)
-
+        del self.state.CxB
+        
         return out
 
 class LinearTP(torch.nn.Linear):
@@ -130,7 +149,7 @@ class LinearTP(torch.nn.Linear):
         self.world_size = dist.get_world_size()
         
     def forward(self, x):
-        x = x.chunk(self.world_size, dim=2)[self.rank] 
+        x = x.chunk(self.world_size, dim=2)[self.rank]
         out = F.linear(x, self.weight, self.bias)
         dist.all_reduce(out, op=ReduceOp.SUM)
         return out
@@ -175,7 +194,7 @@ class EmbeddingTP(torch.nn.Embedding):
         tensor_list = [torch.zeros_like(emb) for _ in range(self.world_size)]
         dist.all_gather(tensor_list, emb)
         emb = torch.cat(tensor_list, dim=2)
-
+        del tensor_list
         return emb
 
 
@@ -219,13 +238,14 @@ def replace_8bit_linear(model, threshold=6.0, modules_to_not_convert="lm_head"):
             replace_8bit_linear(module, threshold, modules_to_not_convert)
 
         if isinstance(module, nn.Linear) and name not in modules_to_not_convert:
-                model._modules[name] = Linear8bit(
-                        input_features=module.in_features,
-                        output_features=module.out_features,
-                        threshold=6.0,
-                        weight_data=module.weight,
-                        bias_data=module.bias,
+            model._modules[name] = Linear8bit(
+                    input_features=module.in_features,
+                    output_features=module.out_features,
+                    threshold=6.0,
+                    weight_data=module.weight,
+                    bias_data=module.bias,
                 )
+    
     return model
 
 def get_8bit_tp_model(model, rank, world_size):
@@ -243,19 +263,16 @@ def get_8bit_tp_model(model, rank, world_size):
             bias = bias_list[rank]
             delattr(module, "bias")
             setattr(module, "bias", nn.Parameter(bias))
-        
-        if isinstance(module, EmbeddingTP):
             
+        if isinstance(module, EmbeddingTP):   
             weight_list = list(module.weight.chunk(world_size, dim=1))
             delattr(module, 'weight')
             weight = nn.Parameter(weight_list[rank])
             setattr(module, 'weight', weight)
-            module_emb = module
             
         if isinstance(module, LinearTP):
             delattr(module, 'weight')
-            setattr(module, 'weight', module_emb.weight)
-            del module_emb
+            setattr(module, 'weight', model._modules['transformer']._modules['word_embeddings'].weight)
             
         
     return model
