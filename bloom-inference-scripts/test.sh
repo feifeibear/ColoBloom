@@ -18,4 +18,4 @@ CUDA_VISIBLE_DEVICES_set_n_least_memory_usage ${GPU_NUM}
 
 export CUDA_LAUNCH_BLOCKING=1
 
-torchrun --nproc_per_node=${GPU_NUM} --master_port=1145 bloom_basic.py
+torchrun --nproc_per_node=${GPU_NUM} --master_port=1145 bloom_int8_tp.py 
