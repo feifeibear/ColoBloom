@@ -7,10 +7,6 @@ import time
 import torch
 
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-import colossalai
-from colossalai.utils.model.colo_init_context import ColoInitContext
-from colossalai.tensor import ShardSpec, ComputeSpec, ComputePattern, ColoParameter, ProcessGroup
-from transformers import BloomTokenizerFast, BloomForCausalLM
 
 
 def get_args():
@@ -23,8 +19,7 @@ def get_args():
     parser.add_argument("--top-k", type=int, default=0)
     parser.add_argument("--top-p", type=float, default=0.0)
     parser.add_argument("--dtype", type=str, help="float16 or int8", choices=["int8", "float16"], default="float16")
-    parser.add_argument("--backend", type=str, help="accelerate or colossalai", choices=["accelerate", "colossalai"], default="accelerate")
-    
+
     return parser.parse_args()
 
 
@@ -74,8 +69,10 @@ else:
 
 model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
 
+
 if args.benchmark:
     t_ready = time.time()
+
 
 ### Generate
 
@@ -104,63 +101,13 @@ print_rank0(f"Generate args {generate_kwargs}")
 inputs = input_sentences[: args.batch_size]
 
 
-colossalai.launch_from_torch(config={})
-with ColoInitContext(device=torch.cuda.current_device()):
-    colo_model = BloomForCausalLM.from_pretrained("/data2/users/lczht/bloom-560m")
-
-def colo_generate():
-    # add ColossalAI Tensor Splitting Parallel
-    def split_param_single_dim_tp1d(dim: int, param: ColoParameter, pg: ProcessGroup):
-        spec = (ShardSpec([dim], [pg.tp_world_size()]), ComputeSpec(ComputePattern.TP1D))
-        if param.process_group.tp_world_size() == 1:
-            param.set_process_group(pg)
-        param.set_tensor_spec(*spec)
-
-    def split_param_row_tp1d(param: ColoParameter, pg: ProcessGroup):
-        split_param_single_dim_tp1d(0, param, pg)
-
-    def split_param_col_tp1d(param: ColoParameter, pg: ProcessGroup):
-        split_param_single_dim_tp1d(-1, param, pg)
-
-    pg = ProcessGroup(tp_degree=torch.distributed.get_world_size())
-    for mn, module in colo_model.named_modules():
-        for pn, param in module.named_parameters(recurse=False):
-            # reset process group for all parameters
-            param.set_process_group(pg)
-
-            param_name = f"{mn}.{pn}"
-            shard_param_names = ['self_attention.dense.weight', 'dense_h_to_4h.weight', 'dense_4h_to_h.weight', 'self_attention.query_key_value.weight', 'word_embeddings.weight']
-            is_shard = False
-            for keyword in shard_param_names:
-                if keyword in param_name:
-                    split_param_col_tp1d(param, pg)  # colmn slice 
-                    # print(f'split_param_row_tp1d for {param_name}')
-                    is_shard = True
-    
-    # run inference
-    input_tokens = tokenizer.batch_encode_plus(inputs, return_tensors="pt", padding=True)
-    for t in input_tokens:
-        if torch.is_tensor(input_tokens[t]):
-            input_tokens[t] = input_tokens[t].to(torch.cuda.current_device())
-
-    outputs = colo_model.generate(**input_tokens, **generate_kwargs)
-
-    input_tokens_lengths = [x.shape[0] for x in input_tokens.input_ids]
-    output_tokens_lengths = [x.shape[0] for x in outputs]
-
-    total_new_tokens = [o - i for i, o in zip(input_tokens_lengths, output_tokens_lengths)]
-    outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-
-    return zip(inputs, outputs, total_new_tokens)
-
-
 def generate():
     """returns a list of zipped inputs, outputs and number of new tokens"""
 
     input_tokens = tokenizer.batch_encode_plus(inputs, return_tensors="pt", padding=True)
     for t in input_tokens:
         if torch.is_tensor(input_tokens[t]):
-            input_tokens[t] = input_tokens[t].to(torch.cuda.current_device())
+            input_tokens[t] = input_tokens[t].to("cuda:0")
 
     outputs = model.generate(**input_tokens, **generate_kwargs)
 
@@ -173,7 +120,7 @@ def generate():
     return zip(inputs, outputs, total_new_tokens)
 
 
-print_rank0(f"*** Running generate")
+print_rank0("*** Running generate")
 t_generate_start = time.time()
 generated = generate()
 t_generate_span = time.time() - t_generate_start
@@ -188,27 +135,18 @@ if args.benchmark:
     torch.cuda.empty_cache()
     gc.collect()
 
-    print_rank0(f"*** Running benchmark")
+    print_rank0("*** Running benchmark")
     # warm up
-
-    if args.backend == "colossalai":
-        generator = colo_generate
-    elif args.backend == "accelerate":
-        generator = generate
-    else:
-        raise NotImplemented
-
     for i in range(1):
-        _ = generator()
+        _ = generate()
     torch.cuda.synchronize()
 
     # benchmark
     t0 = time.time()
     cycles = 5
     total_new_tokens_generated = 0
-
     for i in range(cycles):
-        generated = generator()
+        generated = generate()
         total_new_tokens_generated += sum(new_tokens for _, _, new_tokens in generated)
     torch.cuda.synchronize()
     througput = (time.time() - t0) / (total_new_tokens_generated)
@@ -221,4 +159,3 @@ Tokenize and generate {total_new_tokens_generated} (bs={args.batch_size}) tokens
 Start to finish: {t_ready - t_start + t_generate_span:.3f} secs
 """
     )
-    
