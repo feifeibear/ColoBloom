@@ -10,10 +10,10 @@ import colossalai
 from colossalai.utils.model.colo_init_context import ColoInitContext
 from colossalai.tensor import ShardSpec, ComputeSpec, ComputePattern, ColoParameter, ProcessGroup, ReplicaSpec
 
-from_config = False
-configuration = BloomConfig(hidden_size=2048,  # 64
-                            n_layer=16,  # 2
-                            n_head=16,  # 8
+from_config = True
+configuration = BloomConfig(hidden_size=1024,  # 64
+                            n_layer=128,  # 2
+                            n_head=32,  # 8
                             )
 input_sentence = "Hello, my dog is cute"
 max_new_tokens = 60
@@ -46,7 +46,6 @@ def run_torch(args):
     model_path = args.model_path
     tokenizer = BloomTokenizerFast.from_pretrained(model_path)
     model = BloomForCausalLM.from_pretrained(model_path, **kwargs).to(device)
-
     inputs = tokenizer(input_sentence, return_tensors="pt").to(device)
 
     for k, v in inputs.items():
@@ -64,7 +63,7 @@ def run_accelerate(args):
     generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
     model_name = args.model_path
     kwargs = dict(
-        device_map="balanced_low_0",
+        device_map="balanced",
     )
     infer_dtype = args.dtype
     if infer_dtype == "int8":
@@ -74,10 +73,14 @@ def run_accelerate(args):
         kwargs["torch_dtype"] = torch.float16
     if not from_config:
         print("from pretrained")
-        model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
+        model = BloomForCausalLM.from_pretrained(model_name, **kwargs)
     else:
         print("from config")
-        model = AutoModelForCausalLM.from_config(config=configuration, **kwargs)
+        # model1 = BloomForCausalLM(configuration)
+        # model1.save_pretrained("temp_model_40B")
+        model = BloomForCausalLM.from_pretrained("temp_model_40B", **kwargs)
+    # for pn, param in model.named_parameters():
+    #     print(param.dtype)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     input_tokens = tokenizer.batch_encode_plus([input_sentence], return_tensors="pt", padding=True)
     for t in input_tokens:
@@ -100,35 +103,35 @@ def run_CAI(args):
     rank = dist.get_rank()
     pg = ProcessGroup(tp_degree=world_size)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = BloomTokenizerFast.from_pretrained(model_path)
 
     if args.use_shard_int and from_config :
-        print("from config")
-        dist_spec = ShardSpec([-1], [world_size])
-        with ColoInitContext(device=torch.device('cuda'), default_pg=pg, default_dist_spec=dist_spec):
+        print("from config, sharding")
+        with ColoInitContext(device=torch.cuda.current_device(), dtype=torch.float16, default_pg=pg, default_dist_spec=ShardSpec([0], [pg.tp_world_size()])):
             model = BloomForCausalLM(configuration)
     else:
-        with ColoInitContext(device=torch.device('cuda'), default_pg=pg):
+        with ColoInitContext(device=torch.cuda.current_device(), dtype=torch.float16, default_pg=pg):
             if from_config:
                 print("from config")
                 model = BloomForCausalLM(configuration)
             else:
                 print("from pretrained")
+                print(model_path)
                 model = BloomForCausalLM.from_pretrained(model_path)
 
     # add ColossalAI Tensor Splitting Parallel
     def split_param_single_dim_tp1d(dim: int, param: ColoParameter, pg: ProcessGroup):
         spec = (ShardSpec([dim], [pg.tp_world_size()]), ComputeSpec(ComputePattern.TP1D))
+        if param.process_group.tp_world_size() == 1:
+            param.set_process_group(pg)
         param.set_tensor_spec(*spec)
-
     def split_param_row_tp1d(param: ColoParameter, pg: ProcessGroup):
         split_param_single_dim_tp1d(0, param, pg)
 
-    def split_param_col_tp1d(param: ColoParameter, pg: ProcessGroup):
-        split_param_single_dim_tp1d(-1, param, pg)
-
     # shard_param_names = ['self_attention.dense.weight', 'dense_h_to_4h.weight', 'dense_4h_to_h.weight', 'self_attention.query_key_value.weight', 'word_embeddings.weight']
     shard_param_names = ['mlp', 'self_attention.dense', 'self_attention.query_key_value', 'word_embeddings.weight']
+    num_params = 0
+    num_params_unshard = 0
     for mn, module in model.named_modules():
         for pn, param in module.named_parameters(recurse=True):
             # reset process group for all parameters
@@ -136,26 +139,30 @@ def run_CAI(args):
             if hasattr(param, 'is_visited'):
                 continue
             param_name = f"{mn}.{pn}"
-            
             use_shard = False
             for keyword in shard_param_names:
                 if keyword in param_name:
-                    split_param_col_tp1d(param, pg)  # colmn slice 
+                    split_param_row_tp1d(param, pg)
                     # print('col slice', param_name)
                     use_shard = True
+                    break
             # replicated param
             if not use_shard:
                 param.set_dist_spec(ReplicaSpec())
             param.is_visited = True
-    total_numel = 0
-    for name, p in model.named_parameters():
-        total_numel += p.numel()
-    print(f"numel of the model {total_numel/1e9}")
+            param.requires_grad_(False)
+            num_params += param.numel()
+            if use_shard:
+                num_params_unshard += param.numel() * world_size
+            else:
+                num_params_unshard += param.numel()
+    print('initialize TP OK')
+    print(f"num_params: {num_params}")
+    print(f"num_params_unshard: {num_params_unshard}")
     
-    input_tokens = tokenizer.batch_encode_plus([input_sentence], return_tensors="pt", padding=True)
-    for t in input_tokens:
-        if torch.is_tensor(input_tokens[t]):
-            input_tokens[t] = input_tokens[t].to(torch.cuda.current_device())
+    input_tokens = tokenizer(input_sentence, return_tensors="pt")
+    for k, v in input_tokens.items():
+        input_tokens[k] = v.cuda()
             
     print("inference start")
     # model inference
