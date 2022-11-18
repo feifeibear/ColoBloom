@@ -5,7 +5,7 @@ import bitsandbytes as bnb
 import torch.nn.functional as F
 from typing import Optional
 from torch.distributed.distributed_c10d import ReduceOp
-
+from colossalai.tensor import ColoParameter, ReplicaSpec
 
 class Int8Params(torch.nn.Parameter):
     def __new__(
@@ -258,4 +258,49 @@ def get_8bit_tp_model(model, rank, world_size):
             setattr(module, 'weight', model._modules['transformer']._modules['word_embeddings'].weight)
             
         
+    return model
+
+def replace_8bit_linear_tp_coloparam(model, threshold=6.0, modules_to_not_convert="lm_head"):
+    '''
+    Assert model initialized from ColoInitContext(model contains coloparameters). 
+    Need to 'degrade' it to normal pytorch model(contains pytorchparameters)
+    '''
+    for name, module in model.named_children():
+        if len(list(module.children())) > 0:
+            replace_8bit_linear_tp_coloparam(module, threshold, modules_to_not_convert)
+        # coloparamter -> parameter
+        for pn, param in module.named_parameters(recurse=True):
+            if isinstance(param, ColoParameter):
+                pg = param.get_process_group
+                param.set_dist_spec(ReplicaSpec())
+                module._parameters[pn] = nn.Parameter(param.data)
+                param.requires_grad_(False)
+
+        if isinstance(module, nn.Linear) and name not in modules_to_not_convert:
+                model._modules[name] = Linear8bitTP(
+                        input_features=module.in_features,
+                        output_features=module.out_features,
+                        threshold=6.0,
+                        weight_data=module.weight,
+                        bias_data=module.bias,
+                )
+        
+        if isinstance(module, nn.Embedding):
+            model._modules[name] = EmbeddingTP(
+                num_embeddings=module.num_embeddings,
+                embedding_dim=module.embedding_dim,
+                padding_idx=module.padding_idx,
+                max_norm=module.max_norm,
+                norm_type=module.norm_type,
+                scale_grad_by_freq=module.scale_grad_by_freq,
+                sparse=module.sparse,
+                weight=module.weight,
+            )
+        if name == 'lm_head':
+            model._modules[name] = LinearTP(
+                input_features=module.in_features,
+                output_features=module.out_features,
+                weight_data=module.weight,
+                bias=False,
+            )
     return model

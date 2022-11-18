@@ -13,12 +13,12 @@ CUDA_VISIBLE_DEVICES_set_n_least_memory_usage() {
     echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 }
 
-export GPU_NUM=1
+export GPU_NUM=4
 CUDA_VISIBLE_DEVICES_set_n_least_memory_usage ${GPU_NUM} 
-export DATASET=/data2/users/lccsr/bloom3b/data  # /data2/users/lczht/bloom-560m 
+export DATASET=/data2/users/lczht/bloom-560m    # /data2/users/lczht/bloom-560m 
                                             # /data2/users/lccsr/bloom3b/data 
                                             # /data2/users/lccsr/bloom1b7/data
 # export CUDA_LAUNCH_BLOCKING=1
 
 torchrun --nproc_per_node=${GPU_NUM} --master_port=1145 bloom_cai.py \
---model_path=${DATASET} --use_shard_int=True --backend "colossalai"
+--model_path=${DATASET} --use_shard_int=True --backend "colossalai_int8"

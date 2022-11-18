@@ -10,13 +10,13 @@ import colossalai
 from colossalai.utils.model.colo_init_context import ColoInitContext
 from colossalai.tensor import ShardSpec, ComputeSpec, ComputePattern, ColoParameter, ProcessGroup, ReplicaSpec
 
-from_config = False
-configuration = BloomConfig(hidden_size=14336,  # 64
-                            n_layer=70,  # 2
-                            n_head=112,  # 8
+from_config = True
+configuration = BloomConfig(hidden_size=8192,  # 64
+                            n_layer=48,  # 2
+                            n_head=64,  # 8
                             )
 input_sentence = "Hello, my dog is cute"
-max_new_tokens = 240
+max_new_tokens = 60
 
 def print_rank0(str, rank = 0):
     if rank == 0:
@@ -60,7 +60,7 @@ def run_accelerate(args):
     rank = int(os.getenv("LOCAL_RANK", "0"))
     world_size = torch.cuda.device_count()
     print_rank0(f"Using {world_size} gpus", rank)
-    generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
+    
     model_name = args.model_path
     kwargs = dict(
         device_map="balanced",
@@ -73,12 +73,12 @@ def run_accelerate(args):
         kwargs["torch_dtype"] = torch.float16
     if not from_config:
         print("from pretrained")
-        model = BloomForCausalLM.from_pretrained(model_name, **kwargs)
+        model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
     else:
         print("from config")
         # model1 = BloomForCausalLM(configuration)
         # model1.save_pretrained("temp_model_40B")
-        model = BloomForCausalLM.from_pretrained("temp_model_40B", **kwargs)
+        model = AutoModelForCausalLM.from_pretrained("temp_model_40B", **kwargs)
     # for pn, param in model.named_parameters():
     #     print(param.dtype)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -88,6 +88,10 @@ def run_accelerate(args):
             input_tokens[t] = input_tokens[t].to(torch.cuda.current_device())
             
     t_generate_span = 0
+    generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
+    # warmup
+    for i in range(10):
+        outputs = model.generate(**input_tokens, **generate_kwargs)
     print("inference start")
     for i in range(10):
         t_generate_start = time.time()
@@ -97,16 +101,14 @@ def run_accelerate(args):
     
 def run_CAI(args):
     model_path = args.model_path
-    generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
     colossalai.launch_from_torch(config={})
     world_size = dist.get_world_size()
     rank = dist.get_rank()
     pg = ProcessGroup(tp_degree=world_size)
-
     tokenizer = BloomTokenizerFast.from_pretrained(model_path)
 
     if args.use_shard_int and from_config :
-        print("from config, sharding")
+        print("from config, sharded")
         with ColoInitContext(device=torch.cuda.current_device(), dtype=torch.float16, default_pg=pg, default_dist_spec=ShardSpec([0], [pg.tp_world_size()])):
             model = BloomForCausalLM(configuration)
     else:
@@ -163,10 +165,14 @@ def run_CAI(args):
     input_tokens = tokenizer(input_sentence, return_tensors="pt")
     for k, v in input_tokens.items():
         input_tokens[k] = v.cuda()
-            
+    generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
+    # warmup
+    for i in range(10):
+        outputs = model.generate(**input_tokens, **generate_kwargs)
     print("inference start")
     # model inference
     t_generate_span = 0
+    
     for i in range(10):
         t_generate_start = time.time()
         outputs = model.generate(**input_tokens, **generate_kwargs)
@@ -174,6 +180,64 @@ def run_CAI(args):
         t_generate_span += time.time() - t_generate_start
     print_rank0(f"colossalai t_generate_span: {t_generate_span / 10}", rank)
 
+def run_CAI_int8(args):
+    from utils import replace_8bit_linear_tp, get_8bit_tp_model, Linear8bitTP, EmbeddingTP, LinearTP, replace_8bit_linear_tp_coloparam
+    import torch.nn as nn
+    
+    model_path = args.model_path
+    torch.manual_seed(0)
+    colossalai.launch_from_torch(config={})
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+    pg = ProcessGroup(tp_degree=world_size)
+    tokenizer = BloomTokenizerFast.from_pretrained(model_path)
+    if from_config:
+        print("from config, sharded")
+        with ColoInitContext(device=torch.cuda.current_device(), dtype=torch.float16, default_pg=pg, default_dist_spec=ShardSpec([0], [pg.tp_world_size()])):
+            model = BloomForCausalLM(configuration)
+    else:
+        with ColoInitContext(device=torch.cuda.current_device(), dtype=torch.float16, default_pg=pg):
+            if from_config:
+                print("from config")
+                model = BloomForCausalLM(configuration)
+            else:
+                print("from pretrained")
+                print(model_path)
+                model = BloomForCausalLM.from_pretrained(model_path)
+    # currently int8 mode is not integrated to colossalai. use isolated int8 tp
+    
+    model = replace_8bit_linear_tp_coloparam(model).to(rank)
+    model = get_8bit_tp_model(model, rank, world_size)
+    
+    for pn, param in model.named_parameters(recurse=True):
+        print(pn, param.dtype)
+    num_params = 0
+    for pn, param in model.named_parameters(recurse=True):
+        if hasattr(param, 'is_visited'):
+            continue
+        num_params += param.numel()
+        param.is_visited = True
+    print("num_params: ", num_params)
+    print('initialize INT8 TP OK')
+    input_tokens = tokenizer(input_sentence, return_tensors="pt")
+    for k, v in input_tokens.items():
+        input_tokens[k] = v.cuda()
+    
+    generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
+    # warmup
+    for i in range(10):
+        outputs = model.generate(**input_tokens, **generate_kwargs)
+    # model inference
+    print("inference start")
+    t_generate_span = 0
+    for i in range(10):
+        t_generate_start = time.time()
+        outputs = model.generate(**input_tokens, **generate_kwargs)
+        # torch.cuda.synchronize()
+        t_generate_span += time.time() - t_generate_start
+    print_rank0(f"colossalai t_generate_span: {t_generate_span / 10}", rank)
+    
+    
 if __name__ == '__main__':
     args = get_args()
     if args.backend == "colossalai":
@@ -182,3 +246,5 @@ if __name__ == '__main__':
         run_torch(args)
     elif args.backend == "accelerate":
         run_accelerate(args)
+    elif args.backend == "colossalai_int8":
+        run_CAI_int8(args)
