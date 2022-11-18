@@ -10,14 +10,7 @@ import colossalai
 from colossalai.utils.model.colo_init_context import ColoInitContext
 from colossalai.tensor import ShardSpec, ComputeSpec, ComputePattern, ColoParameter, ProcessGroup, ReplicaSpec
 
-from_config = True
-configuration = BloomConfig(hidden_size=8192,  # 64
-                            n_layer=48,  # 2
-                            n_head=64,  # 8
-                            )
-input_sentence = "Hello, my dog is cute"
-max_new_tokens = 60
-
+INPUT_SENTENCE = "hello, my dog is cute"
 def print_rank0(str, rank = 0):
     if rank == 0:
         print(str)
@@ -30,6 +23,13 @@ def get_args():
     parser.add_argument("--model_path", required=False, type=str, default="/data2/users/lczht/bloom-560m", help="used by dist launchers")
     parser.add_argument("--backend", required=False, type=str, default="colossalai", help = "backend of inference, [colossalai, torch, accelerate]")
     parser.add_argument("--dtype", type=str, help="float16 or int8", choices=["int8", "float16"], default="float16")
+    
+    
+    parser.add_argument("--use_config", dest="use_config", action="store_true")
+    parser.add_argument("--hidden_size", type=int, default=64)
+    parser.add_argument("--n_layer", type=int, default=2)
+    parser.add_argument("--n_head", type=int, default=8)
+    parser.add_argument("--max_new_tokens", type=int, default=60)
     return parser.parse_args()
 
 
@@ -37,6 +37,9 @@ def run_torch(args):
     """
     run bloom inference using PyTorch
     """
+
+    input_sentence = INPUT_SENTENCE
+    
     kwargs = dict()
     # kwargs = dict(
     #     device_map='balanced_low_0'
@@ -57,6 +60,14 @@ def run_torch(args):
     logits = outputs.logits
 
 def run_accelerate(args):
+    from_config = True if args.use_config else False
+    configuration = BloomConfig(hidden_size=args.hidden_size,  # 64
+                                n_layer=args.n_layer,  # 2
+                                n_head=args.n_head,  # 8
+                                )
+    input_sentence = INPUT_SENTENCE
+    max_new_tokens = args.max_new_tokens
+    
     rank = int(os.getenv("LOCAL_RANK", "0"))
     world_size = torch.cuda.device_count()
     print_rank0(f"Using {world_size} gpus", rank)
@@ -100,6 +111,14 @@ def run_accelerate(args):
     print_rank0(f"accelerate t_generate_span: {t_generate_span / 10}", rank)
     
 def run_CAI(args):
+    from_config = True if args.use_config else False
+    configuration = BloomConfig(hidden_size=args.hidden_size,  # 64
+                                n_layer=args.n_layer,  # 2
+                                n_head=args.n_head,  # 8
+                                )
+    input_sentence = INPUT_SENTENCE
+    max_new_tokens = args.max_new_tokens
+    
     model_path = args.model_path
     colossalai.launch_from_torch(config={})
     world_size = dist.get_world_size()
@@ -181,6 +200,14 @@ def run_CAI(args):
     print_rank0(f"colossalai t_generate_span: {t_generate_span / 10}", rank)
 
 def run_CAI_int8(args):
+    from_config = True if args.use_config else False
+    configuration = BloomConfig(hidden_size=args.hidden_size,  # 64
+                                n_layer=args.n_layer,  # 2
+                                n_head=args.n_head,  # 8
+                                )
+    input_sentence = INPUT_SENTENCE
+    max_new_tokens = args.max_new_tokens
+    
     from utils import replace_8bit_linear_tp, get_8bit_tp_model, Linear8bitTP, EmbeddingTP, LinearTP, replace_8bit_linear_tp_coloparam
     import torch.nn as nn
     
@@ -240,11 +267,17 @@ def run_CAI_int8(args):
     
 if __name__ == '__main__':
     args = get_args()
+    print(args)
     if args.backend == "colossalai":
-        run_CAI(args)
+        if args.dtype == "float16":
+            print("colossalai fp16")
+            run_CAI(args)
+        elif args.dtype == "int8":
+            print("colossalai int8")
+            run_CAI_int8(args)
     elif args.backend == "torch":
         run_torch(args)
     elif args.backend == "accelerate":
+        print("accelerate")
         run_accelerate(args)
-    elif args.backend == "colossalai_int8":
-        run_CAI_int8(args)
+        
