@@ -70,7 +70,6 @@ class Linear8bitTP(nn.Linear):
         
         self.state.CB = self.weight.data
         self.state.SCB = self.weight.SCB
-        
         out = bnb.matmul(x, self.weight, bias=self.bias, state=self.state)
         tensor_list = [torch.zeros_like(out) for _ in range(self.world_size)]
         dist.all_gather(tensor_list, out)

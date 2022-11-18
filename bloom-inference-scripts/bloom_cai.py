@@ -10,13 +10,13 @@ import colossalai
 from colossalai.utils.model.colo_init_context import ColoInitContext
 from colossalai.tensor import ShardSpec, ComputeSpec, ComputePattern, ColoParameter, ProcessGroup, ReplicaSpec
 
-from_config = True
-configuration = BloomConfig(hidden_size=1024,  # 64
-                            n_layer=128,  # 2
-                            n_head=32,  # 8
+from_config = False
+configuration = BloomConfig(hidden_size=14336,  # 64
+                            n_layer=70,  # 2
+                            n_head=112,  # 8
                             )
 input_sentence = "Hello, my dog is cute"
-max_new_tokens = 60
+max_new_tokens = 240
 
 def print_rank0(str, rank = 0):
     if rank == 0:

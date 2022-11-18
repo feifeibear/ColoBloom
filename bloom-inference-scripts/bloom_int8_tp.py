@@ -4,6 +4,7 @@ import torch.distributed as dist
 from utils import replace_8bit_linear_tp, get_8bit_tp_model
 import colossalai
 
+# torchrun --nproc_per_node=2 --master_port=1145 bloom_int8_tp.py 
 
 def run_tp(world_size : int = 2):
     # init
@@ -62,5 +63,5 @@ def check_results():
 
 
 if __name__ == '__main__':
-    run_tp()
-    # check_results()
+    # run_tp()
+    check_results()
