@@ -100,16 +100,19 @@ def run_accelerate(args):
             
     t_generate_span = 0
     generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
+    torch.cuda.reset_peak_memory_stats()
     # warmup
     for i in range(10):
         outputs = model.generate(**input_tokens, **generate_kwargs)
     print("inference start")
+    
     for i in range(10):
         t_generate_start = time.time()
         outputs = model.generate(**input_tokens, **generate_kwargs)
         t_generate_span += time.time() - t_generate_start
     print_rank0(f"accelerate t_generate_span: {t_generate_span / 10}", rank)
-    
+    max_usage = torch.cuda.max_memory_allocated()
+    print(f"max cuda memory usage: {max_usage}")
 def run_CAI(args):
     from_config = True if args.use_config else False
     configuration = BloomConfig(hidden_size=args.hidden_size,  # 64
@@ -185,6 +188,7 @@ def run_CAI(args):
     for k, v in input_tokens.items():
         input_tokens[k] = v.cuda()
     generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
+    torch.cuda.reset_peak_memory_stats()
     # warmup
     for i in range(10):
         outputs = model.generate(**input_tokens, **generate_kwargs)
@@ -198,7 +202,9 @@ def run_CAI(args):
         # torch.cuda.synchronize()
         t_generate_span += time.time() - t_generate_start
     print_rank0(f"colossalai t_generate_span: {t_generate_span / 10}", rank)
-
+    max_usage = torch.cuda.max_memory_allocated()
+    print(f"max cuda memory usage: {max_usage}")
+    
 def run_CAI_int8(args):
     from_config = True if args.use_config else False
     configuration = BloomConfig(hidden_size=args.hidden_size,  # 64
@@ -251,6 +257,7 @@ def run_CAI_int8(args):
         input_tokens[k] = v.cuda()
     
     generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
+    torch.cuda.reset_peak_memory_stats()
     # warmup
     for i in range(10):
         outputs = model.generate(**input_tokens, **generate_kwargs)
@@ -263,6 +270,8 @@ def run_CAI_int8(args):
         # torch.cuda.synchronize()
         t_generate_span += time.time() - t_generate_start
     print_rank0(f"colossalai t_generate_span: {t_generate_span / 10}", rank)
+    max_usage = torch.cuda.max_memory_allocated()
+    print(f"max cuda memory usage: {max_usage}")
     
     
 if __name__ == '__main__':
