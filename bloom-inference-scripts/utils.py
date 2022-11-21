@@ -295,18 +295,16 @@ def get_8bit_tp_model_from_colomodule(model, world_size=1, rank=0, threshold=6.0
                 model._modules[name] = module
 
                 weight_list = list(module.weight.data.chunk(world_size, dim=0))
-                weight = weight_list[rank]
+                weight = weight_list[rank].clone().detach()
 
                 SCB_list = list(module.weight.SCB.chunk(world_size, dim=0))
                 SCB = SCB_list[rank]
                 delattr(module, "weight")
                 setattr(module, "weight", Int8Params(data=weight, SCB=SCB))
-                del weight_list
                 bias_list = list(module.bias.data.chunk(world_size, dim=0))
-                bias = bias_list[rank]
+                bias = bias_list[rank].clone().detach()
                 delattr(module, "bias")
                 setattr(module, "bias", nn.Parameter(bias))
-                del bias_list
             if isinstance(module, nn.Embedding):
                 module = EmbeddingTP(
                     num_embeddings=module.num_embeddings,
@@ -321,9 +319,8 @@ def get_8bit_tp_model_from_colomodule(model, world_size=1, rank=0, threshold=6.0
                 model._modules[name] =module
                 weight_list = list(module.weight.chunk(world_size, dim=1))
                 delattr(module, 'weight')
-                weight = nn.Parameter(weight_list[rank])
+                weight = nn.Parameter(weight_list[rank].clone().detach())
                 setattr(module, 'weight', weight)
-                del weight_list
             if name == 'lm_head':
                 module = LinearTP(
                     input_features=module.in_features,
