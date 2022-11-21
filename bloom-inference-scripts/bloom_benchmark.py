@@ -203,7 +203,7 @@ def run_CAI(args):
     for k, v in input_tokens.items():
         input_tokens[k] = v.cuda()
     generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
-    torch.cuda.reset_peak_memory_stats()
+    torch.cuda.reset_peak_memory_stats(rank)
     # warmup
     for i in range(1):
         outputs = model.generate(**input_tokens, **generate_kwargs)
@@ -217,7 +217,7 @@ def run_CAI(args):
         # torch.cuda.synchronize()
         t_generate_span += time.time() - t_generate_start
     print_rank0(f"colossalai t_generate_span: {t_generate_span / turn_num}", rank)
-    max_usage = torch.cuda.max_memory_allocated()
+    max_usage = torch.cuda.max_memory_allocated(rank)
     print(f"max cuda memory usage: {max_usage / 1024 /1024} MB")
     
 def run_CAI_int8(args):
@@ -277,7 +277,7 @@ def run_CAI_int8(args):
         input_tokens[k] = v.cuda()
     
     generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
-    torch.cuda.reset_peak_memory_stats()
+    torch.cuda.reset_peak_memory_stats(rank)
     # warmup
     for i in range(1):
         outputs = model.generate(**input_tokens, **generate_kwargs)
@@ -291,7 +291,7 @@ def run_CAI_int8(args):
         # torch.cuda.synchronize()
         t_generate_span += time.time() - t_generate_start
     print_rank0(f"colossalai t_generate_span: {t_generate_span / turn_num}", rank)
-    max_usage = torch.cuda.max_memory_allocated()
+    max_usage = torch.cuda.max_memory_allocated(rank)
     print(f"max cuda memory usage: {max_usage / 1024 /1024} MB")
     
     
