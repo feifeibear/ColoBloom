@@ -239,18 +239,19 @@ def get_8bit_tp_model(model, rank, world_size):
             weight_list.clear()
             SCB_list = list(module.weight.SCB.chunk(world_size, dim=0))
             SCB = SCB_list[rank]
+            int8_param = Int8Params(data=weight.clone().detach(), SCB=SCB)
             delattr(module, "weight")
-            setattr(module, "weight", Int8Params(data=weight, SCB=SCB))
+            setattr(module, "weight", int8_param)
 
             bias_list = list(module.bias.data.chunk(world_size, dim=0))
-            bias = bias_list[rank]
+            bias = bias_list[rank].clone().detach()
             delattr(module, "bias")
             setattr(module, "bias", nn.Parameter(bias))
             
         if isinstance(module, EmbeddingTP):   
             weight_list = list(module.weight.chunk(world_size, dim=1))
+            weight = nn.Parameter(weight_list[rank].clone().detach())
             delattr(module, 'weight')
-            weight = nn.Parameter(weight_list[rank])
             setattr(module, 'weight', weight)
             
         if isinstance(module, LinearTP):
