@@ -16,11 +16,13 @@ def run_tp(world_size : int = 2):
     model = BloomForCausalLM.from_pretrained("/data2/users/lczht/bloom-560m")
     model = model.half()
     # quantize
-    model = replace_8bit_linear_tp(model)
+    model = replace_8bit_linear_tp(model).to(rank)
     # model = replace_8bit_linear_tp(model).to(rank)
     # TP
     model = get_8bit_tp_model(model, rank, world_size)
-    model.to(rank)
+    # model.to(rank)
+    for pn, param in model.named_parameters():
+        print(pn, param.device)
     # model
     torch.cuda.reset_peak_memory_stats()
     # inputs

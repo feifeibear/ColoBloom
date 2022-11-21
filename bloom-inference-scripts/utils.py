@@ -236,7 +236,7 @@ def get_8bit_tp_model(model, rank, world_size):
         if isinstance(module, Linear8bitTP):
             weight_list = list(module.weight.data.chunk(world_size, dim=0))
             weight = weight_list[rank]
-
+            weight_list.clear()
             SCB_list = list(module.weight.SCB.chunk(world_size, dim=0))
             SCB = SCB_list[rank]
             delattr(module, "weight")
