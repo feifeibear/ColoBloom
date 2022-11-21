@@ -260,47 +260,82 @@ def get_8bit_tp_model(model, rank, world_size):
         
     return model
 
-def replace_8bit_linear_tp_coloparam(model, threshold=6.0, modules_to_not_convert="lm_head"):
-    '''
-    Assert model initialized from ColoInitContext(model contains coloparameters). 
-    Need to 'degrade' it to normal pytorch model(contains pytorchparameters)
-    '''
-    for name, module in model.named_children():
-        if len(list(module.children())) > 0:
-            replace_8bit_linear_tp_coloparam(module, threshold, modules_to_not_convert)
-        # coloparamter -> parameter
-        for pn, param in module.named_parameters(recurse=True):
-            if isinstance(param, ColoParameter):
-                pg = param.get_process_group
-                param.set_dist_spec(ReplicaSpec())
-                module._parameters[pn] = nn.Parameter(param.data)
-                param.requires_grad_(False)
 
-        if isinstance(module, nn.Linear) and name not in modules_to_not_convert:
-                model._modules[name] = Linear8bitTP(
+def get_8bit_tp_model_from_colomodule(model, world_size=1, rank=0, threshold=6.0, modules_to_not_convert="lm_head"):
+    replaced_tensors = dict()
+    def replace_8bit_linear_tp_from_coloparam(model, threshold=6.0, modules_to_not_convert="lm_head"):
+        '''
+        Assert model initialized from ColoInitContext(model contains coloparameters). 
+        Need to 'degrade' it to normal pytorch model(contains pytorchparameters)
+        '''
+        for name, module in model.named_children():
+            if len(list(module.children())) > 0:
+                replace_8bit_linear_tp_from_coloparam(module, threshold, modules_to_not_convert)
+            # coloparamter -> parameter
+            for pn, param in module.named_parameters(recurse=True):
+                if isinstance(param, ColoParameter):
+                    if param in replaced_tensors:
+                       torch_param = replaced_tensors[param]
+                    else :
+                        param.set_dist_spec(ReplicaSpec())
+                        torch_param = nn.Parameter(param.data)
+                        torch_param.requires_grad_(False)
+                        replaced_tensors[param] = torch_param
+                    module._parameters[pn] = torch_param
+
+            if isinstance(module, nn.Linear) and name not in modules_to_not_convert:
+                module = Linear8bitTP(
                         input_features=module.in_features,
                         output_features=module.out_features,
                         threshold=6.0,
                         weight_data=module.weight,
                         bias_data=module.bias,
                 )
-        
-        if isinstance(module, nn.Embedding):
-            model._modules[name] = EmbeddingTP(
-                num_embeddings=module.num_embeddings,
-                embedding_dim=module.embedding_dim,
-                padding_idx=module.padding_idx,
-                max_norm=module.max_norm,
-                norm_type=module.norm_type,
-                scale_grad_by_freq=module.scale_grad_by_freq,
-                sparse=module.sparse,
-                weight=module.weight,
-            )
-        if name == 'lm_head':
-            model._modules[name] = LinearTP(
-                input_features=module.in_features,
-                output_features=module.out_features,
-                weight_data=module.weight,
-                bias=False,
-            )
-    return model
+                model._modules[name] = module
+
+                weight_list = list(module.weight.data.chunk(world_size, dim=0))
+                weight = weight_list[rank]
+
+                SCB_list = list(module.weight.SCB.chunk(world_size, dim=0))
+                SCB = SCB_list[rank]
+                delattr(module, "weight")
+                setattr(module, "weight", Int8Params(data=weight, SCB=SCB))
+                del weight_list
+                bias_list = list(module.bias.data.chunk(world_size, dim=0))
+                bias = bias_list[rank]
+                delattr(module, "bias")
+                setattr(module, "bias", nn.Parameter(bias))
+                del bias_list
+            if isinstance(module, nn.Embedding):
+                module = EmbeddingTP(
+                    num_embeddings=module.num_embeddings,
+                    embedding_dim=module.embedding_dim,
+                    padding_idx=module.padding_idx,
+                    max_norm=module.max_norm,
+                    norm_type=module.norm_type,
+                    scale_grad_by_freq=module.scale_grad_by_freq,
+                    sparse=module.sparse,
+                    weight=module.weight,
+                )
+                model._modules[name] =module
+                weight_list = list(module.weight.chunk(world_size, dim=1))
+                delattr(module, 'weight')
+                weight = nn.Parameter(weight_list[rank])
+                setattr(module, 'weight', weight)
+                del weight_list
+            if name == 'lm_head':
+                module = LinearTP(
+                    input_features=module.in_features,
+                    output_features=module.out_features,
+                    weight_data=module.weight,
+                    bias=False,
+                )
+                model._modules[name] = module
+                delattr(module, 'weight')
+                setattr(module, 'weight', model._modules['transformer']._modules['word_embeddings'].weight)
+            model._modules[name].to(rank)
+        return model
+    ret =  replace_8bit_linear_tp_from_coloparam(model, threshold=threshold, modules_to_not_convert=modules_to_not_convert)
+    # replaced_tensors.clear()
+    del replaced_tensors
+    return ret

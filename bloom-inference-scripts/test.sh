@@ -17,28 +17,29 @@ CUDA_VISIBLE_DEVICES_set_n_least_memory_usage() {
 
 
 export GPU_NUM=4
-export DATASET=/data2/users/lczht/bloom-560m    # /data2/users/lczht/bloom-560m 
+export DATASET=/data2/users/lccsr/bloom3b/data      # /data2/users/lczht/bloom-560m 
                                             # /data2/users/lccsr/bloom3b/data 
                                             # /data2/users/lccsr/bloom1b7/data
-export USE_CONFIG=1
+export USE_CONFIG=0
 export HIDDEN_SIZE=2048
 export N_LAYERS=16
 export N_HEAD=16
 
-export MAX_NEW_TOKENS=60
+export MAX_NEW_TOKENS=10
 export BACKEND="accelerate"     # "colossalai"
                                 # "accelerate"
-export DTYPE="int8" # "float16"
+export DTYPE="float16" # "float16"
                     # "int8"
-
-
-
 
 if [[ ${USE_CONFIG} == 1 ]]; then
 USE_CONFIG_FLAG="--use_config"
 else
 USE_CONFIG_FLAG=""
 fi
+
+
+
+
 
 CUDA_VISIBLE_DEVICES_set_n_least_memory_usage ${GPU_NUM} 
 

@@ -87,8 +87,10 @@ def run_accelerate(args):
         model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
     else:
         print("from config")
-        # model1 = BloomForCausalLM(configuration)
-        # model1.save_pretrained("temp_model_40B")
+        model1 = BloomForCausalLM(configuration) # once saved, comment this line
+        model1.save_pretrained("temp_model_40B") # once saved, comment this line
+        del model1
+        print("temp module from config saved.")
         model = AutoModelForCausalLM.from_pretrained("temp_model_40B", **kwargs)
     # for pn, param in model.named_parameters():
     #     print(param.dtype)
@@ -100,7 +102,8 @@ def run_accelerate(args):
             
     t_generate_span = 0
     generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
-    torch.cuda.reset_peak_memory_stats()
+    for i in range(world_size):
+        torch.cuda.reset_peak_memory_stats(i)
     # warmup
     for i in range(10):
         outputs = model.generate(**input_tokens, **generate_kwargs)
@@ -111,8 +114,14 @@ def run_accelerate(args):
         outputs = model.generate(**input_tokens, **generate_kwargs)
         t_generate_span += time.time() - t_generate_start
     print_rank0(f"accelerate t_generate_span: {t_generate_span / 10}", rank)
-    max_usage = torch.cuda.max_memory_allocated()
-    print(f"max cuda memory usage: {max_usage}")
+    max_usage = 0
+    for i in range(world_size):
+        torch.cuda.reset_peak_memory_stats(i)
+        memory = torch.cuda.max_memory_allocated(i)
+        print(f"device {i} memory usage: {memory / 1024 /1024} MB")
+        max_usage = max(max_usage, memory)
+    print(f"max cuda memory usage: {max_usage / 1024 /1024} MB")
+    
 def run_CAI(args):
     from_config = True if args.use_config else False
     configuration = BloomConfig(hidden_size=args.hidden_size,  # 64
@@ -190,20 +199,20 @@ def run_CAI(args):
     generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
     torch.cuda.reset_peak_memory_stats()
     # warmup
-    for i in range(10):
+    for i in range(1):
         outputs = model.generate(**input_tokens, **generate_kwargs)
     print("inference start")
     # model inference
     t_generate_span = 0
-    
-    for i in range(10):
+    turn_num = 1
+    for i in range(turn_num):
         t_generate_start = time.time()
         outputs = model.generate(**input_tokens, **generate_kwargs)
         # torch.cuda.synchronize()
         t_generate_span += time.time() - t_generate_start
-    print_rank0(f"colossalai t_generate_span: {t_generate_span / 10}", rank)
+    print_rank0(f"colossalai t_generate_span: {t_generate_span / turn_num}", rank)
     max_usage = torch.cuda.max_memory_allocated()
-    print(f"max cuda memory usage: {max_usage}")
+    print(f"max cuda memory usage: {max_usage / 1024 /1024} MB")
     
 def run_CAI_int8(args):
     from_config = True if args.use_config else False
@@ -214,7 +223,7 @@ def run_CAI_int8(args):
     input_sentence = INPUT_SENTENCE
     max_new_tokens = args.max_new_tokens
     
-    from utils import replace_8bit_linear_tp, get_8bit_tp_model, Linear8bitTP, EmbeddingTP, LinearTP, replace_8bit_linear_tp_coloparam
+    from utils import replace_8bit_linear_tp, get_8bit_tp_model, get_8bit_tp_model_from_colomodule
     import torch.nn as nn
     
     model_path = args.model_path
@@ -237,13 +246,18 @@ def run_CAI_int8(args):
                 print("from pretrained")
                 print(model_path)
                 model = BloomForCausalLM.from_pretrained(model_path)
-    # currently int8 mode is not integrated to colossalai. use isolated int8 tp
     
-    model = replace_8bit_linear_tp_coloparam(model).to(rank)
-    model = get_8bit_tp_model(model, rank, world_size)
+    # currently int8 mode is not integrated to colossalai. use isolated int8 tp
+    # if from_config:
+    #     model = BloomForCausalLM(configuration).half()
+    # else :
+    #     model = BloomForCausalLM.from_pretrained(model_path).half()
+    model = get_8bit_tp_model_from_colomodule(model, world_size=world_size, rank=rank)
+    # model = replace_8bit_linear_tp(model).to(rank)
+    # model = get_8bit_tp_model(model, rank, world_size)
     
     for pn, param in model.named_parameters(recurse=True):
-        print(pn, param.dtype)
+        print(pn, param.dtype, type(param))
     num_params = 0
     for pn, param in model.named_parameters(recurse=True):
         if hasattr(param, 'is_visited'):
@@ -259,19 +273,20 @@ def run_CAI_int8(args):
     generate_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
     torch.cuda.reset_peak_memory_stats()
     # warmup
-    for i in range(10):
+    for i in range(1):
         outputs = model.generate(**input_tokens, **generate_kwargs)
     # model inference
     print("inference start")
     t_generate_span = 0
-    for i in range(10):
+    turn_num = 1
+    for i in range(turn_num):
         t_generate_start = time.time()
         outputs = model.generate(**input_tokens, **generate_kwargs)
         # torch.cuda.synchronize()
         t_generate_span += time.time() - t_generate_start
-    print_rank0(f"colossalai t_generate_span: {t_generate_span / 10}", rank)
+    print_rank0(f"colossalai t_generate_span: {t_generate_span / turn_num}", rank)
     max_usage = torch.cuda.max_memory_allocated()
-    print(f"max cuda memory usage: {max_usage}")
+    print(f"max cuda memory usage: {max_usage / 1024 /1024} MB")
     
     
 if __name__ == '__main__':
