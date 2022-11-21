@@ -87,9 +87,17 @@ def run_accelerate(args):
         model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
     else:
         print("from config")
-        # model1 = BloomForCausalLM(configuration)
-        # model1.save_pretrained("temp_model_40B")
-        model = AutoModelForCausalLM.from_pretrained("temp_model_40B", **kwargs)
+        filename = f"temp_model_{args.hidden_size}_{args.n_layer}_{args.n_head}"
+        if not os.path.exists(filename):
+            print(f"generate {filename}...") 
+            model1 = BloomForCausalLM(configuration)
+            model1.save_pretrained(filename)
+            del model1
+            print(f"generate {filename} done") 
+        else:
+            print(f"load {filename} done") 
+            
+        model = AutoModelForCausalLM.from_pretrained(filename, **kwargs)
     # for pn, param in model.named_parameters():
     #     print(param.dtype)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
