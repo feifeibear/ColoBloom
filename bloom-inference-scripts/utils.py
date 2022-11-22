@@ -264,7 +264,14 @@ def get_8bit_tp_model(model, rank, world_size):
 
 def get_8bit_tp_model_from_colomodule(model, world_size=1, rank=0, threshold=6.0, modules_to_not_convert="lm_head"):
     replaced_tensors = dict()
+    param_count = 0
+    repeat_count = 0
+    torch.cuda.reset_peak_memory_stats(rank)
+    
     def replace_8bit_linear_tp_from_coloparam(model, threshold=6.0, modules_to_not_convert="lm_head"):
+        nonlocal replaced_tensors
+        nonlocal param_count
+        nonlocal repeat_count
         '''
         Assert model initialized from ColoInitContext(model contains coloparameters). 
         Need to 'degrade' it to normal pytorch model(contains pytorchparameters)
@@ -274,14 +281,18 @@ def get_8bit_tp_model_from_colomodule(model, world_size=1, rank=0, threshold=6.0
                 replace_8bit_linear_tp_from_coloparam(module, threshold, modules_to_not_convert)
             # coloparamter -> parameter
             for pn, param in module.named_parameters(recurse=True):
+                param_count += 1
                 if isinstance(param, ColoParameter):
                     if param in replaced_tensors:
-                       torch_param = replaced_tensors[param]
+                        repeat_count += 1
+                        torch_param = replaced_tensors[param]
                     else :
                         param.set_dist_spec(ReplicaSpec())
+                        param.data = param.data.to("cpu")
                         torch_param = nn.Parameter(param.data)
                         torch_param.requires_grad_(False)
                         replaced_tensors[param] = torch_param
+                        
                     module._parameters[pn] = torch_param
 
             if isinstance(module, nn.Linear) and name not in modules_to_not_convert:
@@ -292,7 +303,7 @@ def get_8bit_tp_model_from_colomodule(model, world_size=1, rank=0, threshold=6.0
                         weight_data=module.weight,
                         bias_data=module.bias,
                 )
-                model._modules[name] = module
+                
 
                 weight_list = list(module.weight.data.chunk(world_size, dim=0))
                 weight = weight_list[rank].clone().detach()
@@ -305,6 +316,7 @@ def get_8bit_tp_model_from_colomodule(model, world_size=1, rank=0, threshold=6.0
                 bias = bias_list[rank].clone().detach()
                 delattr(module, "bias")
                 setattr(module, "bias", nn.Parameter(bias))
+                model._modules[name] = module
             if isinstance(module, nn.Embedding):
                 module = EmbeddingTP(
                     num_embeddings=module.num_embeddings,
@@ -316,11 +328,12 @@ def get_8bit_tp_model_from_colomodule(model, world_size=1, rank=0, threshold=6.0
                     sparse=module.sparse,
                     weight=module.weight,
                 )
-                model._modules[name] =module
+                
                 weight_list = list(module.weight.chunk(world_size, dim=1))
                 delattr(module, 'weight')
                 weight = nn.Parameter(weight_list[rank].clone().detach())
                 setattr(module, 'weight', weight)
+                model._modules[name] = module
             if name == 'lm_head':
                 module = LinearTP(
                     input_features=module.in_features,
@@ -328,12 +341,17 @@ def get_8bit_tp_model_from_colomodule(model, world_size=1, rank=0, threshold=6.0
                     weight_data=module.weight,
                     bias=False,
                 )
-                model._modules[name] = module
+                
                 delattr(module, 'weight')
                 setattr(module, 'weight', model._modules['transformer']._modules['word_embeddings'].weight)
+                model._modules[name] = module
             model._modules[name].to(rank)
         return model
+    
     ret =  replace_8bit_linear_tp_from_coloparam(model, threshold=threshold, modules_to_not_convert=modules_to_not_convert)
-    # replaced_tensors.clear()
     del replaced_tensors
+    print(f"param_count : {param_count}")
+    print(f"repeat_count: {repeat_count}")
+    max_usage = torch.cuda.max_memory_allocated(rank)
+    print(f"max cuda memory usage: {max_usage / 1024 /1024} MB")
     return ret

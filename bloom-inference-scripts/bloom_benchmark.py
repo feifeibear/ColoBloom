@@ -195,6 +195,8 @@ def run_CAI(args):
                 num_params_unshard += param.numel() * world_size
             else:
                 num_params_unshard += param.numel()
+    max_usage = torch.cuda.max_memory_allocated(rank)
+    print(f"max cuda memory usage: {max_usage / 1024 /1024} MB")
     print('initialize TP OK')
     print(f"num_params: {num_params}")
     print(f"num_params_unshard: {num_params_unshard}")
@@ -210,7 +212,7 @@ def run_CAI(args):
     print("inference start")
     # model inference
     t_generate_span = 0
-    turn_num = 1
+    turn_num = 10
     for i in range(turn_num):
         t_generate_start = time.time()
         outputs = model.generate(**input_tokens, **generate_kwargs)
@@ -252,7 +254,6 @@ def run_CAI_int8(args):
                 print("from pretrained")
                 print(model_path)
                 model = BloomForCausalLM.from_pretrained(model_path)
-    
     # currently int8 mode is not integrated to colossalai. use isolated int8 tp
     # if from_config:
     #     model = BloomForCausalLM(configuration).half()
@@ -262,8 +263,8 @@ def run_CAI_int8(args):
     # model = replace_8bit_linear_tp(model).to(rank)
     # model = get_8bit_tp_model(model, rank, world_size)
     
-    for pn, param in model.named_parameters(recurse=True):
-        print(pn, param.dtype, type(param))
+    # for pn, param in model.named_parameters(recurse=True):
+    #     print(pn, param.dtype, param.device)
     num_params = 0
     for pn, param in model.named_parameters(recurse=True):
         if hasattr(param, 'is_visited'):
@@ -281,10 +282,10 @@ def run_CAI_int8(args):
     # warmup
     for i in range(1):
         outputs = model.generate(**input_tokens, **generate_kwargs)
-    # model inference
+    # model inferences
     print("inference start")
     t_generate_span = 0
-    turn_num = 1
+    turn_num = 10
     for i in range(turn_num):
         t_generate_start = time.time()
         outputs = model.generate(**input_tokens, **generate_kwargs)
