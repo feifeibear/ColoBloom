@@ -21,7 +21,7 @@ def getModelSize(model):
         buffer_size += buffer.nelement() * buffer.element_size()
         buffer_sum += buffer.nelement()
     all_size = (param_size + buffer_size) / 1024 / 1024
-    print('模型总大小为：{:.3f}MB'.format(all_size))
+    print('Model Size: {:.3f}MB'.format(all_size))
     return (param_size, param_sum, buffer_size, buffer_sum, all_size)
 
 class Int8Params(torch.nn.Parameter):
@@ -202,7 +202,7 @@ class EmbeddingTP(torch.nn.Embedding):
         del tensor_list
         return emb
 
-
+@torch.no_grad()
 def replace_8bit_linear_tp(model, threshold=6.0, modules_to_not_convert="lm_head"):
     for name, module in model.named_children():
         if len(list(module.children())) > 0:
@@ -237,6 +237,7 @@ def replace_8bit_linear_tp(model, threshold=6.0, modules_to_not_convert="lm_head
             )
     return model
 
+@torch.no_grad()
 def replace_8bit_linear(model, threshold=6.0, modules_to_not_convert="lm_head"):
     for name, module in model.named_children():
         if len(list(module.children())) > 0:
@@ -253,6 +254,7 @@ def replace_8bit_linear(model, threshold=6.0, modules_to_not_convert="lm_head"):
     
     return model
 
+@torch.no_grad()
 def get_8bit_tp_model(model, rank, world_size):
     model = replace_8bit_linear_tp(model)
     for name, module in model.named_modules():
@@ -291,7 +293,7 @@ def get_8bit_tp_model(model, rank, world_size):
     
     return model
 
-
+@torch.no_grad()
 def get_8bit_tp_model_list(model, model_list, world_size):
     model = replace_8bit_linear_tp(model)
     for i in range(world_size):
@@ -334,7 +336,6 @@ def get_8bit_tp_model_list(model, model_list, world_size):
                 delattr(module, "bias")
                 setattr(module, "bias", nn.Parameter(bias.clone().detach()))
                 
-                    
             if isinstance(module, EmbeddingTP):   
                 weight_list = list(module.weight.chunk(world_size, dim=1))
                 delattr(module, 'weight')
@@ -345,7 +346,7 @@ def get_8bit_tp_model_list(model, model_list, world_size):
                 delattr(module, 'weight')
                 setattr(module, 'weight', model_tmp._modules['transformer']._modules['word_embeddings'].weight)
         model_list.append(model_tmp)
-        del model_tmp
+        del model_tmp 
     return model_list
 
 
