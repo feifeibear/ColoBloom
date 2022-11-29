@@ -5,6 +5,7 @@ import os
 from utils import replace_8bit_linear_tp, get_8bit_tp_model, get_8bit_tp_model_list, replace_8bit_linear, getModelSize, init_empty_weights, Linear8bitTP
 import time
 import torch.profiler
+import colossalai
 
 datapath = "/data2/users/lccsr/bloom3b/data"     
 
@@ -19,10 +20,9 @@ def add_param(model, param_tensor, name):
         return model
 
 def run_int8():
-        world_size = torch.cuda.device_count()
-        local_rank = int(os.getenv("LOCAL_RANK", "0"))
-        rank = local_rank
-        dist.init_process_group(backend='nccl', world_size=world_size, rank=rank)
+        colossalai.launch_from_torch(config={})
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
         cpu_group = dist.new_group(backend='gloo')
 
         # meta init
@@ -85,7 +85,6 @@ def run_int8():
         print(rank, outputs)
                 
 
-    
 def run_fp16():
         model = BloomForCausalLM.from_pretrained(datapath, low_cpu_mem_usage=True).half().to(0)
         tokenizer = BloomTokenizerFast.from_pretrained(datapath)
