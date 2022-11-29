@@ -5,13 +5,25 @@ import os
 from utils import replace_8bit_linear_tp, get_8bit_tp_model, get_8bit_tp_model_list, replace_8bit_linear, getModelSize, init_empty_weights, Linear8bitTP
 import time
 import torch.profiler
-       
-def run8():
+
+datapath = "/data2/users/lccsr/bloom3b/data"     
+
+def add_param(model, param_tensor, name):
+        param = torch.nn.Parameter(param_tensor, requires_grad=False)
+        name_list = name.split('.')
+        module = model._modules[name_list[0]]
+        for i in range(1, len(name_list) - 1):
+                module = module._modules[name_list[i]]
+        module._parameters[name_list[-1]] = param
+        del param_tensor
+        return model
+
+def run_int8():
         world_size = torch.cuda.device_count()
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
         rank = local_rank
         dist.init_process_group(backend='nccl', world_size=world_size, rank=rank)
-        cpu_group = dist.new_group(backend='gloo') if dist.get_backend() != 'gloo' else None
+        cpu_group = dist.new_group(backend='gloo')
 
         # meta init
         if rank == 0:
@@ -21,13 +33,16 @@ def run8():
                 record_shapes=True,
                 with_stack=True
                 ) as prof:        
-                        model = BloomForCausalLM.from_pretrained("/data2/users/lccsr/bloom3b/data", low_cpu_mem_usage=True).half()
+                        model = BloomForCausalLM.from_pretrained(datapath, low_cpu_mem_usage=True).half()
+                        # get meta_model_list
                         model_list = []
                         with init_empty_weights():
-                                configuration = BloomConfig.from_json_file('/data2/users/lccsr/bloom3b/data/config.json')
+                                configuration = BloomConfig.from_json_file(datapath + '/config.json')
                                 for i in range(world_size):
                                         model_list.append(BloomForCausalLM(configuration).half())
+                        # get quant & sharded model_list
                         model_list = get_8bit_tp_model_list(model, model_list, world_size)
+                        # send out
                         for name, param in model_list[0].named_parameters():
                                 param_list = [param.data]
                                 for i in range(1, world_size):
@@ -48,28 +63,21 @@ def run8():
                 with_stack=True
                 ) as prof:
                         with init_empty_weights():
-                                configuration = BloomConfig.from_json_file('/data2/users/lccsr/bloom3b/data/config.json')
+                                configuration = BloomConfig.from_json_file(datapath + '/config.json')
                                 model = BloomForCausalLM(configuration).half()
                         model = get_8bit_tp_model(model, rank, world_size)
                         for name, param in model.named_parameters():
                                 param_tensor = torch.zeros(param.data.size(), dtype=param.dtype)
                                 dist.scatter(param_tensor, src=0, group=cpu_group)
-                                param = torch.nn.Parameter(param_tensor, requires_grad=False)
-                                name_list = name.split('.')
-                                module = model._modules[name_list[0]]
-                                for i in range(1, len(name_list) - 1):
-                                        module = module._modules[name_list[i]]
-                                module._parameters[name_list[-1]] = param
-                                del param_tensor
+                                model = add_param(model, param_tensor, name)
                         model._modules['lm_head']._parameters['weight']= model._modules['transformer']._modules['word_embeddings'].weight  
                         prof.step()
                 
         
         model = model.to(rank)
         
-        # inference
-        
-        tokenizer = BloomTokenizerFast.from_pretrained("/data2/users/lccsr/bloom3b/data")
+        # generate inference
+        tokenizer = BloomTokenizerFast.from_pretrained(datapath)
         inputs = tokenizer("Hello, my dog is cute", return_tensors="pt").to(rank)
         generate_kwargs = dict(max_new_tokens=100, do_sample=False)
         outputs = model.generate(**inputs, **generate_kwargs)
@@ -78,14 +86,16 @@ def run8():
                 
 
     
-def run16():
-        model = BloomForCausalLM.from_pretrained("/data2/users/lccsr/bloom3b/data", low_cpu_mem_usage=True).half().to(0)
-        tokenizer = BloomTokenizerFast.from_pretrained("/data2/users/lccsr/bloom3b/data")
+def run_fp16():
+        model = BloomForCausalLM.from_pretrained(datapath, low_cpu_mem_usage=True).half().to(0)
+        tokenizer = BloomTokenizerFast.from_pretrained(datapath)
         inputs = tokenizer("Hello, my dog is cute", return_tensors="pt").to(0)
         generate_kwargs = dict(max_new_tokens=100, do_sample=False)
         outputs = model.generate(**inputs, **generate_kwargs)
         outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
         print(outputs)
+
         
 if __name__ == '__main__':
-        run8()
+        # run_fp16()
+        run_int8()
