@@ -145,7 +145,7 @@ class Linear8bit(nn.Linear):
         
         return out
 
-class LinearTP(torch.nn.Linear):
+class LinearTP(nn.Linear):
     def __init__(self, input_features, output_features, bias=False, weight_data=None, bias_data=None):
         super(LinearTP, self).__init__(input_features, output_features, bias)
         self.weight = weight_data
@@ -203,7 +203,7 @@ class EmbeddingTP(torch.nn.Embedding):
         return emb
 
 @torch.no_grad()
-def replace_8bit_linear_tp(model, threshold=6.0, modules_to_not_convert="lm_head"):
+def replace_8bit_linear_tp(model, threshold=6.0, modules_to_not_convert="lm_head"):   
     for name, module in model.named_children():
         if len(list(module.children())) > 0:
             replace_8bit_linear_tp(module, threshold, modules_to_not_convert)
@@ -217,7 +217,7 @@ def replace_8bit_linear_tp(model, threshold=6.0, modules_to_not_convert="lm_head
                         bias_data=module.bias,
                 )
         
-        if isinstance(module, nn.Embedding):
+        elif isinstance(module, nn.Embedding):
             model._modules[name] = EmbeddingTP(
                 num_embeddings=module.num_embeddings,
                 embedding_dim=module.embedding_dim,
@@ -228,13 +228,19 @@ def replace_8bit_linear_tp(model, threshold=6.0, modules_to_not_convert="lm_head
                 sparse=module.sparse,
                 weight=module.weight,
             )
-        if name == 'lm_head':
-            model._modules[name] = LinearTP(
+        
+        # [fix me]    
+        elif isinstance(module, nn.Linear) and name == 'lm_head':
+            with skip_init():
+                model._modules[name] = LinearTP(
                 input_features=module.in_features,
                 output_features=module.out_features,
-                weight_data=module.weight,
+                weight_data=None,
                 bias=False,
-            )
+                )
+            delattr(model._modules[name], 'weight')
+            setattr(model._modules[name], 'weight', model._modules['transformer']._modules['word_embeddings'].weight)
+    
     return model
 
 @torch.no_grad()
@@ -298,58 +304,66 @@ def get_8bit_tp_model_list(model, model_list, world_size):
     model = replace_8bit_linear_tp(model)
     for i in range(world_size):
         model_list[i] = replace_8bit_linear_tp(model_list[i])
+    
+    for name, module in model.named_modules():
+        if isinstance(module, Linear8bitTP):
+            module.quant()
+            weight_list = list(module.weight.data.chunk(world_size, dim=0))
+            SCB_list = list(module.SCB.data.chunk(world_size, dim=0))
+            bias_list = list(module.bias.data.chunk(world_size, dim=0))
+            
+            name_list = name.split('.')
+            for rank in range(world_size):
+                module_tmp = model_list[rank]._modules[name_list[0]]
+                for i in range(1, len(name_list)):
+                    module_tmp = module_tmp._modules[name_list[i]]
+                delattr(module_tmp, "weight")
+                setattr(module_tmp, "weight", nn.Parameter(weight_list[rank].clone().detach(), requires_grad=False))
+                delattr(module_tmp, "SCB")
+                setattr(module_tmp, "SCB", nn.Parameter(SCB_list[rank].clone().detach(), requires_grad=False))
+                delattr(module_tmp, "bias")
+                setattr(module_tmp, "bias", nn.Parameter(bias_list[rank].clone().detach()))
+            del weight_list, SCB_list, bias_list, name_list
+            module.to("meta")
 
-    for rank in range(world_size):
-        model_tmp = model_list[rank]
-        for name, module in model_tmp.named_modules():
-            if len(list(module.children())) == 0:
-                name_list = name.split('.')
-                module_tmp = model._modules[name_list[0]]
+        elif isinstance(module, EmbeddingTP):
+            weight_list = list(module.weight.chunk(world_size, dim=1))
+            name_list = name.split('.')
+            for rank in range(world_size):
+                module_tmp = model_list[rank]._modules[name_list[0]]
+                for i in range(1, len(name_list)):
+                    module_tmp = module_tmp._modules[name_list[i]]
+                module_tmp.weight = nn.Parameter(weight_list[rank].clone().detach(), requires_grad=False)
+            del name_list, weight_list
+            module.to("meta")
+            
+        elif isinstance(module, LinearTP):
+            name_list = name.split('.')
+            for rank in range(world_size):
+                module_tmp = model_list[rank]._modules[name_list[0]]
+                for i in range(1, len(name_list)):
+                    module_tmp = module_tmp._modules[name_list[i]]
+                module_tmp.weight = model_list[rank]._modules['transformer']._modules['word_embeddings'].weight
+            module.to("meta")
+            
+        elif len(list(module.children())) == 0:
+            name_list = name.split('.')
+            for rank in range(world_size):
+                module_tmp = model_list[rank]._modules[name_list[0]]
                 for i in range(1, len(name_list)):
                     module_tmp = module_tmp._modules[name_list[i]]
                 try:
-                    module.weight = module_tmp.weight
+                    module_tmp.weight = module.weight
                 except:
                     pass
                 try:
-                    module.bias = module_tmp.bias
+                    module_tmp.bias = module.bias
                 except:
                     pass
+            module.to("meta")
             
-            if isinstance(module, Linear8bitTP):
-                module.quant()
-                
-                weight_list = list(module.weight.data.chunk(world_size, dim=0))
-                weight = weight_list[rank]
-
-                SCB_list = list(module.SCB.data.chunk(world_size, dim=0))
-                SCB = SCB_list[rank]
-                
-                delattr(module, "weight")
-                setattr(module, "weight", nn.Parameter(weight.clone().detach(), requires_grad=False))
-                
-                delattr(module, "SCB")
-                setattr(module, "SCB", nn.Parameter(SCB.clone().detach(), requires_grad=False))
-
-                bias_list = list(module.bias.data.chunk(world_size, dim=0))
-                bias = bias_list[rank]
-                delattr(module, "bias")
-                setattr(module, "bias", nn.Parameter(bias.clone().detach()))
-                
-            if isinstance(module, EmbeddingTP):   
-                weight_list = list(module.weight.chunk(world_size, dim=1))
-                delattr(module, 'weight')
-                weight = nn.Parameter(weight_list[rank].clone().detach())
-                setattr(module, 'weight', weight)
-            
-            if isinstance(module, LinearTP):
-                delattr(module, 'weight')
-                setattr(module, 'weight', model_tmp._modules['transformer']._modules['word_embeddings'].weight)
-        model_list.append(model_tmp)
-        del model_tmp 
     return model_list
-
-
+            
 
 from contextlib import contextmanager
 @contextmanager
@@ -368,5 +382,16 @@ def init_empty_weights():
         yield
     finally:
         nn.Module.register_parameter = old_register_parameter
-        
 
+@contextmanager
+def skip_init():
+    old_init = nn.Linear.reset_parameters
+    
+    def new_init(self):
+        pass
+    
+    try:
+        nn.Linear.reset_parameters = new_init
+        yield
+    finally:
+        nn.Linear.reset_parameters = old_init
