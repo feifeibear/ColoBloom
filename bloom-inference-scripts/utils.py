@@ -7,7 +7,6 @@ from typing import Optional
 from torch.distributed.distributed_c10d import ReduceOp
 import time
 import torch.profiler
-import copy
 
 def getModelSize(model):
     param_size = 0
@@ -23,22 +22,6 @@ def getModelSize(model):
     all_size = (param_size + buffer_size) / 1024 / 1024
     print('Model Size: {:.3f}MB'.format(all_size))
     return (param_size, param_sum, buffer_size, buffer_sum, all_size)
-
-class Int8Params(torch.nn.Parameter):
-    def __new__(
-        cls,
-        data=None,
-        requires_grad=False,
-        has_fp16_weights=False,
-        SCB=None,
-    ):
-        if data is None:
-            data = torch.empty(0)
-        return torch.Tensor._make_subclass(cls, data, requires_grad)
-
-    def __init__(self, data, requires_grad=False):
-        super(Int8Params, self).__init__
-        self.data = data
 
 class Linear8bitTP(nn.Linear):
     def __init__(
@@ -145,13 +128,23 @@ class Linear8bit(nn.Linear):
         
         return out
 
-class LinearTP(nn.Linear):
-    def __init__(self, input_features, output_features, bias=False, weight_data=None, bias_data=None):
-        super(LinearTP, self).__init__(input_features, output_features, bias)
-        self.weight = weight_data
-        self.bias = bias_data
+class LinearTP(nn.Module):
+    __constants__ = ['in_features', 'out_features']
+    in_features: int
+    out_features: int
+    weight: Tensor
+    
+    def __init__(self, in_features:int, out_features:int, bias:bool=False,
+                 device="meta", dtype=None) -> None:
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        super(LinearTP, self).__init__()
         self.rank = dist.get_rank()
         self.world_size = dist.get_world_size()
+        self.weight = nn.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
+        else:
+            self.register_parameter('bias', None)
         
     def forward(self, x):
         x = x.chunk(self.world_size, dim=2)[self.rank]
@@ -159,7 +152,7 @@ class LinearTP(nn.Linear):
         dist.all_reduce(out, op=ReduceOp.SUM)
         return out
 
-class EmbeddingTP(torch.nn.Embedding):
+class EmbeddingTP(nn.Embedding):
     def __init__(
         self,
         num_embeddings: int,
@@ -228,19 +221,14 @@ def replace_8bit_linear_tp(model, threshold=6.0, modules_to_not_convert="lm_head
                 sparse=module.sparse,
                 weight=module.weight,
             )
-        
-        # [fix me]    
+          
         elif isinstance(module, nn.Linear) and name == 'lm_head':
-            with skip_init():
-                model._modules[name] = LinearTP(
-                input_features=module.in_features,
-                output_features=module.out_features,
-                weight_data=None,
+            model._modules[name] = LinearTP(
+                in_features=module.in_features,
+                out_features=module.out_features,
                 bias=False,
                 )
-            delattr(model._modules[name], 'weight')
-            setattr(model._modules[name], 'weight', model._modules['transformer']._modules['word_embeddings'].weight)
-    
+            model._modules[name].weight = model._modules['transformer']._modules['word_embeddings'].weight
     return model
 
 @torch.no_grad()
@@ -270,11 +258,6 @@ def get_8bit_tp_model(model, rank, world_size):
             
             weight_list = list(module.weight.data.chunk(world_size, dim=0))
             weight = weight_list[rank]
-            # try:
-            #     SCB_list = list(module.SCB.data.chunk(world_size, dim=0))
-            #     SCB = SCB_list[rank]
-            #     print(1)
-            # except:
             SCB = torch.zeros_like(bias).to("meta")
             
             delattr(module, "weight")
