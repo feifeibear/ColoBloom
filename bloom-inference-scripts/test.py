@@ -21,11 +21,11 @@ def add_param(model, param_tensor, name):
     del param_tensor
 
 
-def scatter_model(model, meta_model, rank, world_size, cpu_group):
+def scatter_model(src_model, target_model, rank, world_size, cpu_group):
     if rank == 0:
         # get quant & sharded model_list
         time0 = time.time()
-        model_list = get_8bit_tp_model_list(model, meta_model, world_size)
+        model_list = get_8bit_tp_model_list(src_model, target_model, world_size)
         print("Model init complete", time.time() - time0)
 
         dist.barrier(cpu_group)
@@ -43,7 +43,7 @@ def scatter_model(model, meta_model, rank, world_size, cpu_group):
         del model_list
         return model
     else:
-        model = get_8bit_tp_model(meta_model, rank, world_size)
+        model = get_8bit_tp_model(target_model, rank, world_size)
         dist.barrier(cpu_group)
         for name, param in model.named_parameters():
             param_tensor = torch.zeros(
@@ -77,12 +77,11 @@ def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=F
 
     with ctx as prof:
         # meta init
-        
-        if rank == 0:
-            # get meta_model
-            with init_empty_weights():
-                meta_model = BloomForCausalLM(configuration).half()
-                
+        # get meta_model
+        with init_empty_weights():
+            meta_model = BloomForCausalLM(configuration).half()
+            
+        if rank == 0:           
             # get pre_trained model
             if from_pretrain:
                 model = BloomForCausalLM.from_pretrained(
@@ -96,10 +95,7 @@ def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=F
             model = scatter_model(model, meta_model, rank, world_size, cpu_group)
 
         else:
-            with init_empty_weights():
-                model = BloomForCausalLM(configuration).half()
-            
-            model = scatter_model(None, model, rank, world_size, cpu_group)
+            model = scatter_model(None, meta_model, rank, world_size, cpu_group)
             model._modules['lm_head']._parameters['weight'] = model._modules['transformer']._modules['word_embeddings'].weight
 
 
