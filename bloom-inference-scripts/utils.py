@@ -3,11 +3,12 @@ from torch import nn, Tensor
 import torch.distributed as dist
 import bitsandbytes as bnb
 import torch.nn.functional as F
-from typing import Optional
+from typing import Optional, List
 from torch.distributed.distributed_c10d import ReduceOp
 import time
 import torch.profiler
 import copy
+
 
 def getModelSize(model):
     param_size = 0
@@ -152,7 +153,17 @@ class EmbeddingTP(nn.Embedding):
         return emb
 
 @torch.no_grad()
-def replace_8bit_linear_tp(model, threshold=6.0, modules_to_not_convert="lm_head"):   
+def replace_8bit_linear_tp(model : torch.nn.Module, threshold : float =6.0, modules_to_not_convert : str ="lm_head") -> torch.nn.Module:
+    """replace_8bit_linear_tp 
+
+    Args:
+        model (torch.nn.Module): a meta model
+        threshold (float, optional): _description_. Defaults to 6.0.
+        modules_to_not_convert (str, optional): the model names which shall not be shard+quant. Defaults to "lm_head" (for Bloom)
+
+    Returns:
+        torch.nn.Module: the meta model after quantization and tensor parallel sharding
+    """
     for name, module in model.named_children():
         if len(list(module.children())) > 0:
             replace_8bit_linear_tp(module, threshold, modules_to_not_convert)
@@ -222,14 +233,27 @@ def get_8bit_tp_model(model, rank, world_size):
     return model
 
 @torch.no_grad()
-def get_8bit_tp_model_list(model, meta_model, world_size):
+def get_8bit_tp_model_list(model : torch.nn.Module, meta_model : torch.nn.Module, world_size : int) -> List[torch.nn.Module]:
+    """get_8bit_tp_model_list
+
+    Materizate a `world_size` models for each process.
+
+    Args:
+        model (torch.nn.Module): a materialized model. It is sacrificed after the function finishes executing.
+        meta_model (torch.nn.Module): a meta model with the same structure as the `model`.
+        world_size (int): the world size
+
+    Returns:
+        List[torch.nn.Module]: a list of materialized models after sharding and quantization.
+    """
     model = replace_8bit_linear_tp(model)
     
     model_list = []
-    model_tmp = replace_8bit_linear_tp(meta_model)
+    dist_meta_model = replace_8bit_linear_tp(meta_model)
     for i in range(world_size):
-        model_list.append(copy.deepcopy(model_tmp))
+        model_list.append(copy.deepcopy(dist_meta_model))
     
+    # quantize and shard parameters
     for name, module in model.named_modules():
         if isinstance(module, Linear8bitTP):
             module.quant()
