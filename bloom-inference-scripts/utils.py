@@ -240,7 +240,7 @@ def get_8bit_tp_model_list(model : torch.nn.Module, meta_model : torch.nn.Module
 
     Args:
         model (torch.nn.Module): an materized model. It is sacrificed after the function finishes executing.
-        meta_model (torch.nn.Module): a meta model with the same structure as g`model`.
+        meta_model (torch.nn.Module): a meta model with the same structure as the `model`.
         world_size (int): the world size
 
     Returns:
