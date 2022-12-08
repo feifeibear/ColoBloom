@@ -239,12 +239,12 @@ def get_8bit_tp_model_list(model : torch.nn.Module, meta_model : torch.nn.Module
     Materizate a `world_size` models for each process.
 
     Args:
-        model (torch.nn.Module): an materized model. It is sacrificed after the function finishes executing.
+        model (torch.nn.Module): a materialized model. It is sacrificed after the function finishes executing.
         meta_model (torch.nn.Module): a meta model with the same structure as the `model`.
         world_size (int): the world size
 
     Returns:
-        List[torch.nn.Module]: a list of materized models after sharding and quantization.
+        List[torch.nn.Module]: a list of materialized models after sharding and quantization.
     """
     model = replace_8bit_linear_tp(model)
     
