@@ -1,5 +1,5 @@
 import torch
-from transformers import BloomTokenizerFast, BloomForCausalLM, BloomConfig
+from transformers import BloomTokenizerFast, BloomForCausalLM, BloomConfig, AutoModelForCausalLM
 import torch.distributed as dist
 import os
 from utils import  convert_param_attr_context, get_8bit_tp_model, get_8bit_tp_model_list, getModelSize, init_empty_weights, replace_8bit_linear_tp
@@ -98,17 +98,17 @@ def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=F
         # meta init
         # get meta_model
         with init_empty_weights():
-            meta_model = BloomForCausalLM(configuration).half()
+            meta_model = AutoModelForCausalLM.from_config(configuration).half()
         
         print(f'meta model {meta_model.dtype} {meta_model.device}')
         if rank == 0:           
             # get pre_trained model
             if from_pretrain:
-                src_model = BloomForCausalLM.from_pretrained(
+                src_model = AutoModelForCausalLM.from_pretrained(
                     data_path, low_cpu_mem_usage=True, torch_dtype=torch.float16)
             else:
                 with convert_param_attr_context(dtype=torch.float16, use_skip_init=True):
-                    src_model = BloomForCausalLM(configuration)
+                    src_model = AutoModelForCausalLM.from_config(configuration)
 
             model = model_scatter.scatter_model(src_model, meta_model)
 
