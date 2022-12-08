@@ -7,6 +7,7 @@ from typing import Optional
 from torch.distributed.distributed_c10d import ReduceOp
 import time
 import torch.profiler
+import copy
 
 def getModelSize(model):
     param_size = 0
@@ -79,51 +80,6 @@ class Linear8bitTP(nn.Linear):
         dist.all_gather(tensor_list, out)
         out = torch.cat(tensor_list, dim=2)
         del tensor_list
-        del self.state.CxB
-        
-        return out
-
-class Linear8bit(nn.Linear):
-    def __init__(
-        self,
-        input_features,
-        output_features,
-        bias=True,
-        has_fp16_weights=False,
-        memory_efficient_backward=False,
-        threshold=6.0,
-        weight_data=None,
-        index=None,
-        bias_data=None
-    ):
-        super(Linear8bit, self).__init__(
-            input_features, output_features, bias
-        )
-        self.state = bnb.MatmulLtState()
-        self.index = index
-        self.bias = bias_data
-        self.state.threshold = threshold
-        self.state.has_fp16_weights = has_fp16_weights
-        self.state.memory_efficient_backward = memory_efficient_backward
-        if threshold > 0.0 and not has_fp16_weights:
-            self.state.use_pool = True
-
-        weight = weight_data.data.contiguous().half().to(torch.cuda.current_device())
-
-        CB, _, SCB, _, _ = bnb.functional.double_quant(weight)
-        del weight
-        delattr(self, "weight")
-        setattr(self, "weight", Int8Params(data=CB, SCB=SCB))
-
-    def forward(self, x):
-        self.state.is_training = self.training
-        
-        if self.bias is not None and self.bias.dtype != torch.float16:
-            self.bias.data = self.bias.data.half()
-        
-        self.state.CB = self.weight.data
-        self.state.SCB = self.weight.SCB
-        out = bnb.matmul(x, self.weight, bias=self.bias, state=self.state)
         del self.state.CxB
         
         return out
@@ -221,7 +177,7 @@ def replace_8bit_linear_tp(model, threshold=6.0, modules_to_not_convert="lm_head
                 sparse=module.sparse,
                 weight=module.weight,
             )
-          
+        
         elif isinstance(module, nn.Linear) and name == 'lm_head':
             model._modules[name] = LinearTP(
                 in_features=module.in_features,
@@ -229,23 +185,6 @@ def replace_8bit_linear_tp(model, threshold=6.0, modules_to_not_convert="lm_head
                 bias=False,
                 )
             model._modules[name].weight = model._modules['transformer']._modules['word_embeddings'].weight
-    return model
-
-@torch.no_grad()
-def replace_8bit_linear(model, threshold=6.0, modules_to_not_convert="lm_head"):
-    for name, module in model.named_children():
-        if len(list(module.children())) > 0:
-            replace_8bit_linear(module, threshold, modules_to_not_convert)
-
-        if isinstance(module, nn.Linear) and name not in modules_to_not_convert:
-            model._modules[name] = Linear8bit(
-                    input_features=module.in_features,
-                    output_features=module.out_features,
-                    threshold=6.0,
-                    weight_data=module.weight,
-                    bias_data=module.bias,
-                )
-    
     return model
 
 @torch.no_grad()
@@ -285,8 +224,10 @@ def get_8bit_tp_model(model, rank, world_size):
 @torch.no_grad()
 def get_8bit_tp_model_list(model, model_list, world_size):
     model = replace_8bit_linear_tp(model)
+    
+    model_tmp = replace_8bit_linear_tp(model_list[0])
     for i in range(world_size):
-        model_list[i] = replace_8bit_linear_tp(model_list[i])
+        model_list[i] = copy.deepcopy(model_tmp)
     
     for name, module in model.named_modules():
         if isinstance(module, Linear8bitTP):
@@ -344,7 +285,7 @@ def get_8bit_tp_model_list(model, model_list, world_size):
                 except:
                     pass
             module.to("meta")
-            
+    
     return model_list
             
 
@@ -369,12 +310,33 @@ def init_empty_weights():
 @contextmanager
 def skip_init():
     old_init = nn.Linear.reset_parameters
+    old_emb_init = nn.Embedding.reset_parameters
     
     def new_init(self):
         pass
-    
+    def new_emb_init(self):
+        self._fill_padding_idx_with_zero()
+        
     try:
         nn.Linear.reset_parameters = new_init
+        nn.Embedding.reset_parameters = new_emb_init
+        nn.LayerNorm.reset_parameters = new_init
         yield
     finally:
         nn.Linear.reset_parameters = old_init
+        nn.Embedding.reset_parameters = old_emb_init
+        
+@contextmanager
+def init_dtype_weights(dtype=torch.float32):
+    old_register_parameter = nn.Module.register_parameter
+    
+    def register_empty_param(module, name, param):
+        if param is not None:
+            param = nn.Parameter(param.data.to(dtype))
+        old_register_parameter(module, name, param)
+            
+    try:
+        nn.Module.register_parameter = register_empty_param
+        yield
+    finally:
+        nn.Module.register_parameter = old_register_parameter
