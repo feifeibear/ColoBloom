@@ -43,14 +43,14 @@ def scatter_model(model, meta_model, rank, world_size, cpu_group):
         del model_list
         return model
     else:
-        meta_model = get_8bit_tp_model(meta_model, rank, world_size)
+        model = get_8bit_tp_model(meta_model, rank, world_size)
         dist.barrier(cpu_group)
-        for name, param in meta_model.named_parameters():
+        for name, param in model.named_parameters():
             param_tensor = torch.zeros(
                 param.data.size(), dtype=param.dtype)
             dist.scatter(param_tensor, src=0, group=cpu_group)
-            add_param(meta_model, param_tensor, name)
-        return meta_model
+            add_param(model, param_tensor, name)
+        return model
 
 def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=False):
     colossalai.launch_from_torch(config={})
