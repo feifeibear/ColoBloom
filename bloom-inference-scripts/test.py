@@ -19,8 +19,38 @@ def add_param(model, param_tensor, name):
         module = module._modules[name_list[i]]
     module._parameters[name_list[-1]] = param
     del param_tensor
-    return model
 
+
+def scatter_model(model, meta_model, rank, world_size, cpu_group):
+    if rank == 0:
+        # get quant & sharded model_list
+        time0 = time.time()
+        model_list = get_8bit_tp_model_list(model, meta_model, world_size)
+        print("Model init complete", time.time() - time0)
+
+        dist.barrier(cpu_group)
+        # send out
+        for name, param in model_list[0].named_parameters():
+            param_list = [param.data]
+            for i in range(1, world_size):
+                param_list.append(model_list[i].state_dict()[name])
+            param_tensor = torch.zeros_like(
+                param_list[0], dtype=param_list[0].dtype)
+            dist.scatter(param_tensor, scatter_list=param_list,
+                            src=0, group=cpu_group)
+            del param_list, param_tensor
+        model = model_list[0]
+        del model_list
+        return model
+    else:
+        meta_model = get_8bit_tp_model(meta_model, rank, world_size)
+        dist.barrier(cpu_group)
+        for name, param in meta_model.named_parameters():
+            param_tensor = torch.zeros(
+                param.data.size(), dtype=param.dtype)
+            dist.scatter(param_tensor, src=0, group=cpu_group)
+            add_param(meta_model, param_tensor, name)
+        return meta_model
 
 def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=False):
     colossalai.launch_from_torch(config={})
@@ -47,7 +77,7 @@ def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=F
 
     with ctx as prof:
         # meta init
-        time0 = time.time()
+        
         if rank == 0:
             # get meta_model
             with init_empty_weights():
@@ -60,46 +90,19 @@ def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=F
             else:
                 with convert_param_attr_context(dtype=torch.float16, use_skip_init=True):
                     model = BloomForCausalLM(configuration)
-            getModelSize(model)
-            print("Model load complete", time.time() - time0)
+            
+            # getModelSize(model)
 
-            # get quant & sharded model_list
-            model_list = get_8bit_tp_model_list(model, meta_model, world_size)
-            print("Model init complete", time.time() - time0)
-
-            dist.barrier(cpu_group)
-            # send out
-            for name, param in model_list[0].named_parameters():
-                param_list = [param.data]
-                for i in range(1, world_size):
-                    param_list.append(model_list[i].state_dict()[name])
-                param_tensor = torch.zeros_like(
-                    param_list[0], dtype=param_list[0].dtype)
-                dist.scatter(param_tensor, scatter_list=param_list,
-                             src=0, group=cpu_group)
-                del param_list, param_tensor
-            model = model_list[0]
-            del model_list
+            model = scatter_model(model, meta_model, rank, world_size, cpu_group)
 
         else:
             with init_empty_weights():
                 model = BloomForCausalLM(configuration).half()
-
-            print("rank: ", rank, ", model load complete")
-            model = get_8bit_tp_model(model, rank, world_size)
-            print("rank: ", rank, ", model init complete")
-
-            dist.barrier(cpu_group)
-            for name, param in model.named_parameters():
-                param_tensor = torch.zeros(
-                    param.data.size(), dtype=param.dtype)
-                dist.scatter(param_tensor, src=0, group=cpu_group)
-                model = add_param(model, param_tensor, name)
+            
+            model = scatter_model(None, model, rank, world_size, cpu_group)
             model._modules['lm_head']._parameters['weight'] = model._modules['transformer']._modules['word_embeddings'].weight
-            # pass
 
-        time2 = time.time()
-        print("Model trans complete", time2 - time0, "s")
+
         model = model.to(rank)
         getModelSize(model)
 
