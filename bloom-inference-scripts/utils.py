@@ -328,7 +328,7 @@ def skip_init_context():
         nn.Embedding.reset_parameters = old_emb_init
         
 @contextmanager
-def init_dtype_weights(dtype=torch.float32, use_skip_init : bool = False):
+def convert_param_attr_context(dtype=torch.float32, use_skip_init : bool = False):
     old_register_parameter = nn.Module.register_parameter
     
     def register_empty_param(module, name, param):
