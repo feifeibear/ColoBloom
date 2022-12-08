@@ -326,8 +326,6 @@ def skip_init():
         nn.Linear.reset_parameters = old_init
         nn.Embedding.reset_parameters = old_emb_init
         
-
-
 @contextmanager
 def init_dtype_weights(dtype=torch.float32):
     old_register_parameter = nn.Module.register_parameter
@@ -336,7 +334,6 @@ def init_dtype_weights(dtype=torch.float32):
         if param is not None:
             param = nn.Parameter(param.data.to(dtype))
         old_register_parameter(module, name, param)
-        print(type(module), name)
             
     try:
         nn.Module.register_parameter = register_empty_param
