@@ -222,12 +222,13 @@ def get_8bit_tp_model(model, rank, world_size):
     return model
 
 @torch.no_grad()
-def get_8bit_tp_model_list(model, model_list, world_size):
+def get_8bit_tp_model_list(model, meta_model, world_size):
     model = replace_8bit_linear_tp(model)
     
-    model_tmp = replace_8bit_linear_tp(model_list[0])
+    model_list = []
+    model_tmp = replace_8bit_linear_tp(meta_model)
     for i in range(world_size):
-        model_list[i] = copy.deepcopy(model_tmp)
+        model_list.append(copy.deepcopy(model_tmp))
     
     for name, module in model.named_modules():
         if isinstance(module, Linear8bitTP):
