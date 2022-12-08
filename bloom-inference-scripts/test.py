@@ -131,9 +131,8 @@ def run_fp16(from_pretrain=False, data_path=None):
             hidden_size=14336,
             n_layer=70,
             n_head=112,)
-        with convert_param_attr_context(dtype=torch.float16):
-            with skip_init():
-                model = BloomForCausalLM(cfg)
+        with convert_param_attr_context(dtype=torch.float16, use_skip_init=True):
+            model = BloomForCausalLM(cfg)
         model = model.to(0)
     tokenizer = BloomTokenizerFast.from_pretrained(data_path)
     inputs = tokenizer("Hello, my dog is cute", return_tensors="pt").to(0)
