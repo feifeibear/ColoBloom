@@ -2,7 +2,7 @@ import torch
 from transformers import BloomTokenizerFast, BloomForCausalLM, BloomConfig
 import torch.distributed as dist
 import os
-from utils import skip_init, init_dtype_weights, get_8bit_tp_model, get_8bit_tp_model_list, getModelSize, init_empty_weights, replace_8bit_linear_tp
+from utils import  init_dtype_weights, get_8bit_tp_model, get_8bit_tp_model_list, getModelSize, init_empty_weights, replace_8bit_linear_tp
 import time
 import copy
 import torch.profiler
@@ -63,9 +63,8 @@ def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=F
                 model = BloomForCausalLM.from_pretrained(
                     data_path, low_cpu_mem_usage=True, torch_dtype=torch.float16)
             else:
-                with init_dtype_weights(dtype=torch.float16):
-                    with skip_init():
-                        model = BloomForCausalLM(configuration)
+                with init_dtype_weights(dtype=torch.float16, use_skip_init=True):
+                    model = BloomForCausalLM(configuration)
             getModelSize(model)
             print("Model load complete", time.time() - time0)
 
