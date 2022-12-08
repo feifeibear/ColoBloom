@@ -49,15 +49,10 @@ def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=F
         # meta init
         time0 = time.time()
         if rank == 0:
-            # get meta_model_list
-            model_list = []
+            # get meta_model
             with init_empty_weights():
-                model_tmp = BloomForCausalLM(configuration).half()
-
-            model_list.append(model_tmp)
-            for i in range(world_size):
-                model_list.append(copy.deepcopy(model_tmp))
-
+                meta_model = BloomForCausalLM(configuration).half()
+                
             # get pre_trained model
             if from_pretrain:
                 model = BloomForCausalLM.from_pretrained(
@@ -70,7 +65,7 @@ def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=F
             print("Model load complete", time.time() - time0)
 
             # get quant & sharded model_list
-            model_list = get_8bit_tp_model_list(model, model_list, world_size)
+            model_list = get_8bit_tp_model_list(model, meta_model, world_size)
             print("Model init complete", time.time() - time0)
 
             dist.barrier(cpu_group)
