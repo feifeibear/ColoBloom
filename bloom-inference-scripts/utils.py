@@ -5,8 +5,6 @@ import bitsandbytes as bnb
 import torch.nn.functional as F
 from typing import Optional, List
 from torch.distributed.distributed_c10d import ReduceOp
-import time
-import torch.profiler
 import copy
 
 
@@ -92,21 +90,35 @@ class LinearTP(nn.Module):
     weight: Tensor
     
     def __init__(self, in_features:int, out_features:int, bias:bool=False,
-                 device="meta", dtype=None) -> None:
+                 weight_data=None, bias_data=None, device="meta", dtype=None,
+                 use_int8:bool=True
+                 ) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super(LinearTP, self).__init__()
         self.rank = dist.get_rank()
         self.world_size = dist.get_world_size()
-        self.weight = nn.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
-        if bias:
-            self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
+        self.use_int8 = use_int8
+        if use_int8:
+            self.weight = nn.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
+            if bias:
+                self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
+            else:
+                self.register_parameter('bias', None)
         else:
-            self.register_parameter('bias', None)
+            self.weight = weight_data
+            self.bias = bias_data
         
     def forward(self, x):
-        x = x.chunk(self.world_size, dim=2)[self.rank]
-        out = F.linear(x, self.weight, self.bias)
-        dist.all_reduce(out, op=ReduceOp.SUM)
+        if self.use_int8 == True:
+            x = x.chunk(self.world_size, dim=2)[self.rank]
+            out = F.linear(x, self.weight, self.bias)
+            dist.all_reduce(out, op=ReduceOp.SUM)
+        else:
+            out = F.linear(x, self.weight, self.bias)
+            tensor_list = [torch.zeros_like(out) for _ in range(self.world_size)]
+            dist.all_gather(tensor_list, out)
+            out = torch.cat(tensor_list, dim=2)
+            del tensor_list
         return out
 
 class EmbeddingTP(nn.Embedding):
@@ -153,28 +165,41 @@ class EmbeddingTP(nn.Embedding):
         return emb
 
 @torch.no_grad()
-def replace_8bit_linear_tp(model : torch.nn.Module, threshold : float =6.0, modules_to_not_convert : str ="lm_head") -> torch.nn.Module:
-    """replace_8bit_linear_tp 
-
+def replace_tp_module(model : torch.nn.Module, 
+                      threshold : float = 6.0, 
+                      modules_to_not_convert : str = "lm_head",
+                      use_int8: bool = True
+                      ) -> torch.nn.Module:
+    """replace_tp_module 
     Args:
         model (torch.nn.Module): a meta model
         threshold (float, optional): _description_. Defaults to 6.0.
         modules_to_not_convert (str, optional): the model names which shall not be shard+quant. Defaults to "lm_head" (for Bloom)
-
+        use_int8(boll, optional): use int8 quantization. Defaults to True.
     Returns:
         torch.nn.Module: the meta model after quantization and tensor parallel sharding
     """
     for name, module in model.named_children():
         if len(list(module.children())) > 0:
-            replace_8bit_linear_tp(module, threshold, modules_to_not_convert)
+            replace_tp_module(module, threshold, modules_to_not_convert, use_int8)
 
         if isinstance(module, nn.Linear) and name not in modules_to_not_convert:
+            if use_int8 == True:    
                 model._modules[name] = Linear8bitTP(
                         input_features=module.in_features,
                         output_features=module.out_features,
                         threshold=6.0,
                         weight_data=module.weight,
                         bias_data=module.bias,
+                )
+            else:
+                model._modules[name] = LinearTP(
+                        in_features=module.in_features,
+                        out_features=module.out_features,
+                        bias_data=module.bias,
+                        weight_data=module.weight,
+                        bias = module.bias is not None,
+                        use_int8 = use_int8
                 )
         
         elif isinstance(module, nn.Embedding):
@@ -193,14 +218,27 @@ def replace_8bit_linear_tp(model : torch.nn.Module, threshold : float =6.0, modu
             model._modules[name] = LinearTP(
                 in_features=module.in_features,
                 out_features=module.out_features,
-                bias=False,
+                bias=module.bias is not None
                 )
             model._modules[name].weight = model._modules['transformer']._modules['word_embeddings'].weight
     return model
 
 @torch.no_grad()
-def get_8bit_tp_model(model, rank, world_size):
-    model = replace_8bit_linear_tp(model)
+def get_tp_model(model : nn.Module,
+                 rank : int,
+                 world_size : int, 
+                 use_int8 : bool = True)-> torch.nn.Module:
+    """get_tp_model
+    Shard a meta model for rank process.
+    Args:
+        model (torch.nn.Module): a meta model to be shard for TP.
+        rank (int): the rank number of this process.
+        world_size (int): the world size
+        use_int8 (bool, optional): use int8 quantization. Defaults to True.
+    Returns:
+        torch.nn.Module: a sharded meta model ready for recieving data from rank0.
+    """
+    model = replace_tp_module(model, use_int8=use_int8)
     for name, module in model.named_modules():
         if isinstance(module, Linear8bitTP):
             bias_list = list(module.bias.data.chunk(world_size, dim=0))
@@ -227,29 +265,44 @@ def get_8bit_tp_model(model, rank, world_size):
             setattr(module, 'weight', weight)
             
         if isinstance(module, LinearTP):
-            delattr(module, 'weight')
-            setattr(module, 'weight', model._modules['transformer']._modules['word_embeddings'].weight)
-    
+            if name == 'lm_head':
+                delattr(module, 'weight')
+                setattr(module, 'weight', model._modules['transformer']._modules['word_embeddings'].weight)
+            else:
+                bias_list = list(module.bias.data.chunk(world_size, dim=0))
+                bias = bias_list[rank]
+            
+                weight_list = list(module.weight.data.chunk(world_size, dim=0))
+                weight = weight_list[rank]
+                
+                delattr(module, "weight")
+                setattr(module, "weight", nn.Parameter(weight, requires_grad=False))
+            
+                delattr(module, "bias")
+                setattr(module, "bias", nn.Parameter(bias))
+                
     return model
 
 @torch.no_grad()
-def get_8bit_tp_model_list(model : torch.nn.Module, meta_model : torch.nn.Module, world_size : int) -> List[torch.nn.Module]:
-    """get_8bit_tp_model_list
-
+def get_tp_model_list(model : torch.nn.Module,
+                      meta_model : torch.nn.Module,
+                      world_size : int,
+                      use_int8 : bool=True
+                     ) -> List[torch.nn.Module]:
+    """get_tp_model_list
     Materizate a `world_size` models for each process.
-
     Args:
         model (torch.nn.Module): a materialized model. It is sacrificed after the function finishes executing.
         meta_model (torch.nn.Module): a meta model with the same structure as the `model`.
         world_size (int): the world size
-
+        use_int8 (bool, optional): use int8 quantization. Defaults to True.
     Returns:
         List[torch.nn.Module]: a list of materialized models after sharding and quantization.
     """
-    model = replace_8bit_linear_tp(model)
+    model = replace_tp_module(model, use_int8=use_int8)
     
     model_list = []
-    dist_meta_model = replace_8bit_linear_tp(meta_model)
+    dist_meta_model = replace_tp_module(meta_model, use_int8=use_int8)
     for i in range(world_size):
         model_list.append(copy.deepcopy(dist_meta_model))
     
@@ -287,13 +340,28 @@ def get_8bit_tp_model_list(model : torch.nn.Module, meta_model : torch.nn.Module
             module.to("meta")
             
         elif isinstance(module, LinearTP):
-            name_list = name.split('.')
-            for rank in range(world_size):
-                module_tmp = model_list[rank]._modules[name_list[0]]
-                for i in range(1, len(name_list)):
-                    module_tmp = module_tmp._modules[name_list[i]]
-                module_tmp.weight = model_list[rank]._modules['transformer']._modules['word_embeddings'].weight
+            if name == 'lm_head':
+                name_list = name.split('.')
+                for rank in range(world_size):
+                    module_tmp = model_list[rank]._modules[name_list[0]]
+                    for i in range(1, len(name_list)):
+                        module_tmp = module_tmp._modules[name_list[i]]
+                    module_tmp.weight = model_list[rank]._modules['transformer']._modules['word_embeddings'].weight
+            else:
+                name_list = name.split('.')
+                weight_list = list(module.weight.data.chunk(world_size, dim=0))
+                bias_list = list(module.bias.data.chunk(world_size, dim=0))
+                for rank in range(world_size):
+                    module_tmp = model_list[rank]._modules[name_list[0]]
+                    for i in range(1, len(name_list)):
+                        module_tmp = module_tmp._modules[name_list[i]]
+                    delattr(module_tmp, "weight")
+                    setattr(module_tmp, "weight", nn.Parameter(weight_list[rank].clone().detach(), requires_grad=False))
+                    delattr(module_tmp, "bias")
+                    setattr(module_tmp, "bias", nn.Parameter(bias_list[rank].clone().detach()))
+                del name_list, weight_list, bias_list
             module.to("meta")
+                
             
         elif len(list(module.children())) == 0:
             name_list = name.split('.')
