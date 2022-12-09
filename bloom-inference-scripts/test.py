@@ -2,7 +2,7 @@ import torch
 from transformers import BloomTokenizerFast, BloomForCausalLM, BloomConfig, AutoModelForCausalLM
 import torch.distributed as dist
 import os
-from utils import  convert_param_attr_context, get_8bit_tp_model, get_8bit_tp_model_list, getModelSize, init_empty_weights, replace_8bit_linear_tp
+from utils import  convert_param_attr_context, get_8bit_tp_model, get_8bit_tp_model_list, getModelSize, init_empty_weights, shard_leaf_modules
 import time
 import copy
 import torch.profiler

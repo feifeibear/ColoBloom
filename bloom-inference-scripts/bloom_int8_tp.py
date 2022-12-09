@@ -1,7 +1,7 @@
 import torch
 from transformers import BloomTokenizerFast, BloomForCausalLM
 import torch.distributed as dist
-from utils import replace_8bit_linear_tp, get_8bit_tp_model
+from utils import shard_leaf_modules, get_8bit_tp_model
 import colossalai
 
 # torchrun --nproc_per_node=4 --master_port=1145 bloom_int8_tp.py 
@@ -16,8 +16,8 @@ def run_tp(world_size : int = 2):
     model = BloomForCausalLM.from_pretrained("/data2/users/lczht/bloom-560m")
     model = model.half()
     # quantize
-    model = replace_8bit_linear_tp(model).to(rank)
-    # model = replace_8bit_linear_tp(model).to(rank)
+    model = shard_leaf_modules(model).to(rank)
+    # model = shard_leaf_modules(model).to(rank)
     # TP
     model = get_8bit_tp_model(model, rank, world_size)
     # model.to(rank)
@@ -48,7 +48,7 @@ def check_results():
 
     model = BloomForCausalLM.from_pretrained("/data2/users/lczht/bloom-560m")
     model = model.half()
-    model = replace_8bit_linear_tp(model).to(rank)
+    model = shard_leaf_modules(model).to(rank)
 
     # TP
     model = get_8bit_tp_model(model, rank, world_size)

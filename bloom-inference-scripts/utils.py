@@ -153,9 +153,14 @@ class EmbeddingTP(nn.Embedding):
         return emb
 
 @torch.no_grad()
-def replace_8bit_linear_tp(model : torch.nn.Module, threshold : float =6.0, modules_to_not_convert : str ="lm_head") -> torch.nn.Module:
-    """replace_8bit_linear_tp 
+def shard_leaf_modules(model : torch.nn.Module, 
+                      threshold : float = 6.0, 
+                      modules_to_not_convert : str ="lm_head" , 
+                      use_int8 : bool = True) -> torch.nn.Module:
+    """shard_leaf_modules 
 
+    convert leaf modules to tensor parallelism version.
+    
     Args:
         model (torch.nn.Module): a meta model
         threshold (float, optional): _description_. Defaults to 6.0.
@@ -166,15 +171,22 @@ def replace_8bit_linear_tp(model : torch.nn.Module, threshold : float =6.0, modu
     """
     for name, module in model.named_children():
         if len(list(module.children())) > 0:
-            replace_8bit_linear_tp(module, threshold, modules_to_not_convert)
+            shard_leaf_modules(module, threshold, modules_to_not_convert)
 
         if isinstance(module, nn.Linear) and name not in modules_to_not_convert:
+            if use_int8:
                 model._modules[name] = Linear8bitTP(
                         input_features=module.in_features,
                         output_features=module.out_features,
                         threshold=6.0,
                         weight_data=module.weight,
                         bias_data=module.bias,
+                )
+            else:
+                model._modules[name] = LinearTP(
+                        input_features=module.in_features,
+                        output_features=module.out_features,
+                        bias=module.bias
                 )
         
         elif isinstance(module, nn.Embedding):
@@ -200,7 +212,7 @@ def replace_8bit_linear_tp(model : torch.nn.Module, threshold : float =6.0, modu
 
 @torch.no_grad()
 def get_8bit_tp_model(model, rank, world_size):
-    model = replace_8bit_linear_tp(model)
+    model = shard_leaf_modules(model, use_int8=True)
     for name, module in model.named_modules():
         if isinstance(module, Linear8bitTP):
             bias_list = list(module.bias.data.chunk(world_size, dim=0))
@@ -246,10 +258,10 @@ def get_8bit_tp_model_list(model : torch.nn.Module, meta_model : torch.nn.Module
     Returns:
         List[torch.nn.Module]: a list of materialized models after sharding and quantization.
     """
-    model = replace_8bit_linear_tp(model)
+    model = shard_leaf_modules(model, use_int8=True)
     
     model_list = []
-    dist_meta_model = replace_8bit_linear_tp(meta_model)
+    dist_meta_model = shard_leaf_modules(meta_model)
     for i in range(world_size):
         model_list.append(copy.deepcopy(dist_meta_model))
     

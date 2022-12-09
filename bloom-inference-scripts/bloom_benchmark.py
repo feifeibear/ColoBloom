@@ -222,7 +222,7 @@ def run_CAI_int8(args):
     input_sentence = INPUT_SENTENCE
     max_new_tokens = args.max_new_tokens
     
-    from utils import replace_8bit_linear_tp, get_8bit_tp_model, Linear8bitTP, EmbeddingTP, LinearTP, replace_8bit_linear_tp_coloparam
+    from utils import shard_leaf_modules, get_8bit_tp_model, Linear8bitTP, EmbeddingTP, LinearTP, shard_leaf_modules_coloparam
     import torch.nn as nn
     
     model_path = args.model_path
@@ -247,7 +247,7 @@ def run_CAI_int8(args):
                 model = BloomForCausalLM.from_pretrained(model_path)
     # currently int8 mode is not integrated to colossalai. use isolated int8 tp
     
-    model = replace_8bit_linear_tp_coloparam(model).to(rank)
+    model = shard_leaf_modules_coloparam(model).to(rank)
     model = get_8bit_tp_model(model, rank, world_size)
     
     for pn, param in model.named_parameters(recurse=True):
