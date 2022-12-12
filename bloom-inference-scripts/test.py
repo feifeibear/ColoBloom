@@ -2,9 +2,8 @@ import torch
 from transformers import BloomTokenizerFast, BloomForCausalLM, BloomConfig, AutoModelForCausalLM
 import torch.distributed as dist
 import os
-from utils import  convert_param_attr_context, get_8bit_tp_model, get_8bit_tp_model_list, getModelSize, init_empty_weights, replace_8bit_linear_tp
+from utils import  convert_param_attr_context, get_tp_model, get_tp_model_list, getModelSize, init_empty_weights
 import time
-import copy
 import torch.profiler
 import datetime
 import colossalai
@@ -26,13 +25,14 @@ class ModelScatter(object):
         module._parameters[name_list[-1]] = param
         del param_tensor
 
-    def scatter_model(self, src_model : torch.nn.Module, target_model : torch.nn.Module) -> torch.nn.Module:
+    def scatter_model(self, src_model : torch.nn.Module, target_model : torch.nn.Module, use_int8 : bool = True) -> torch.nn.Module:
         """scatter_model
 
         Args:
             src_model (torch.nn.Module): a global materailized model
             target_model (torch.nn.Module): a meta model with the same structure as `src_model`
-
+            use_int8(bool): use int8 quantization. Defaults to True
+        
         Returns:
             torch.nn.Module: a local materailized model
         """
@@ -43,7 +43,7 @@ class ModelScatter(object):
 
             # get quant & sharded model_list
             time0 = time.time()
-            model_list = get_8bit_tp_model_list(src_model, target_model, self.world_size)
+            model_list = get_tp_model_list(src_model, target_model, self.world_size, use_int8=use_int8)
             print("Model init complete", time.time() - time0)
 
             dist.barrier(self.cpu_group)
@@ -61,7 +61,7 @@ class ModelScatter(object):
             del model_list
             return model
         else:
-            model = get_8bit_tp_model(target_model, self.rank, self.world_size)
+            model = get_tp_model(target_model, self.rank, self.world_size, use_int8=use_int8)
             dist.barrier(self.cpu_group)
             for name, param in model.named_parameters():
                 param_tensor = torch.zeros(
@@ -70,7 +70,7 @@ class ModelScatter(object):
                 self._add_param(model, param_tensor, name)
             return model
 
-def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=False):
+def run_int8_bloom_inference(use_int8=True, from_pretrain=False, data_path=None, use_profiler=False):
     colossalai.launch_from_torch(config={})
     rank = dist.get_rank()
     world_size = dist.get_world_size()
@@ -99,8 +99,6 @@ def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=F
         # get meta_model
         with init_empty_weights():
             meta_model = AutoModelForCausalLM.from_config(configuration).half()
-        
-        print(f'meta model {meta_model.dtype} {meta_model.device}')
         if rank == 0:           
             # get pre_trained model
             if from_pretrain:
@@ -110,10 +108,10 @@ def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=F
                 with convert_param_attr_context(dtype=torch.float16, use_skip_init=True):
                     src_model = AutoModelForCausalLM.from_config(configuration)
 
-            model = model_scatter.scatter_model(src_model, meta_model)
+            model = model_scatter.scatter_model(src_model, meta_model, use_int8)
 
         else:
-            model = model_scatter.scatter_model(None, meta_model)
+            model = model_scatter.scatter_model(None, meta_model, use_int8)
             model._modules['lm_head']._parameters['weight'] = model._modules['transformer']._modules['word_embeddings'].weight
 
 
@@ -133,7 +131,7 @@ def run_int8_bloom_inference(from_pretrain=False, data_path=None, use_profiler=F
             output = model(**inputs, labels=inputs["input_ids"])
             time_list.append(time.time() - timet)
 
-        print("avg inference latency:", sum(time_list)/20)
+        print("Avg inference latency:", sum(time_list)/20)
         print("Max GPU mem allocated:", torch.cuda.max_memory_allocated(rank))
         if use_profiler:
             prof.step()
@@ -155,18 +153,18 @@ def run_fp16(from_pretrain=False, data_path=None):
     generate_kwargs = dict(max_new_tokens=100, do_sample=False)
     outputs = model.generate(**inputs, **generate_kwargs)
     outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-    print(outputs)
 
-def run(int8=True, from_pretrain=False, data_path=None, profile=False):
-    if int8:
-        run_int8_bloom_inference(from_pretrain, data_path, profile)
+def run(tp=True, from_pretrain=False, data_path=None, profile=False, use_int8=True):
+    if tp:
+        run_int8_bloom_inference(from_pretrain=from_pretrain, data_path=data_path, use_profiler=profile, use_int8=use_int8)
     else:
         run_fp16(from_pretrain, data_path)
 
 
 if __name__ == '__main__':
-    int8 = True
+    tp = True
+    use_int8 = False
     from_pretrain = True
     data_path = "/data2/users/lczht/bloom-560m"
     profile = False
-    run(int8, from_pretrain, data_path, profile)
+    run(tp=tp, from_pretrain=from_pretrain, data_path=data_path, profile=profile, use_int8=use_int8)
